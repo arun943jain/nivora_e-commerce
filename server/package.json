@@ -7,7 +7,9 @@
   "main": "src/server.js",
   "scripts": {
     "dev": "node --watch src/server.js",
-    "start": "node src/server.js"
+    "start": "node src/server.js",
+    "seed": "node src/seed/seed.js",
+    "seed:validate": "node src/seed/seed.js --dry-run"
   },
   "engines": {
     "node": ">=20"
