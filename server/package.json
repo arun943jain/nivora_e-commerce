@@ -10,6 +10,7 @@
     "start": "node src/server.js",
     "seed": "node src/seed/seed.js",
     "seed:validate": "node src/seed/seed.js --dry-run",
+    "check-setup": "node src/scripts/checkSetup.js",
     "promote-admin": "node src/scripts/promoteAdmin.js"
   },
   "engines": {

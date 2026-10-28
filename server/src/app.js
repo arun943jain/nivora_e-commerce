@@ -17,6 +17,14 @@ const app = express();
 
 app.disable("x-powered-by");
 
+// Render and Railway terminate TLS at one reverse proxy. Trusting exactly one
+// hop lets the auth rate limiter and request logging see the visitor IP
+// without trusting a client-supplied X-Forwarded-For value. Adjust this if you
+// put another proxy or CDN in front of the API.
+if (env.isProduction) {
+  app.set("trust proxy", 1);
+}
+
 app.use(helmet());
 app.use(
   cors({

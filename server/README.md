@@ -6,13 +6,28 @@ Express + MongoDB API for the Nivora storefront.
 
 1. Copy `server/.env.example` to `server/.env`.
 2. Set `MONGODB_URI`, a random `JWT_SECRET` of at least 32 characters, and the
-   frontend origin in `CLIENT_ORIGIN`.
-3. Install dependencies and start the API:
+   frontend origin in `CLIENT_ORIGIN`. The full beginner walkthrough for Atlas,
+   JWT generation, Razorpay test keys and the webhook secret is in the
+   [project README](../README.md#getting-credentials-step-by-step).
+3. Install dependencies, check configuration and load sample data:
 
 ```bash
 npm install
+npm run check-setup
+npm run seed
 npm run dev
 ```
+
+`npm run check-setup` reports only whether values are present; it never prints
+secret values. It also connects to MongoDB and reports whether transactions are
+supported. Use `npm run check-setup -- --offline` to skip the database check.
+
+`npm run seed` is idempotent and prints created/already-existed counts.
+`npm run seed:validate` validates the sample records without writing.
+
+The API listens on <http://localhost:5000>; the health endpoint is
+<http://localhost:5000/api/health> and reports
+`"status": "ok"` with a connected database when configuration is complete.
 
 `JWT_EXPIRES_IN` controls token lifetime (default `7d`). `COOKIE_SAME_SITE`
 accepts `lax`, `strict` or `none`; `none` requires HTTPS and is forced to a
@@ -22,8 +37,13 @@ Razorpay test keys are optional for local work. Without them the API still
 serves the storefront, but online payment endpoints return `503`. See the
 payments section below for the three variables and webhook setup.
 
-Without `MONGODB_URI` or `JWT_SECRET` the API still starts for catalogue and
-health checks, but registration, login and session endpoints return `503`.
+Atlas M0 clusters are replica sets and support the transactions checkout
+requires. A standalone local MongoDB does not; use a single-node replica set or
+Atlas for checkout and payment testing.
+
+In development, without `MONGODB_URI` or `JWT_SECRET` the API still starts for
+catalogue and health checks, but registration, login and session endpoints
+return `503`.
 
 ## Authentication
 
@@ -127,6 +147,13 @@ unsettled attempt failed; other events are acknowledged and ignored. `Paid` and
 `Refunded` states are never downgraded, and late failure events are ignored
 after settlement.
 
+For local webhook testing, expose port `5000` with a public HTTPS tunnel (for
+example `cloudflared tunnel --url http://localhost:5000` or `ngrok http 5000`)
+and register `https://<tunnel-host>/api/payments/razorpay/webhook` in the
+Razorpay Dashboard. Subscribe to `payment.captured`, `order.paid` and
+`payment.failed`, and keep `RAZORPAY_WEBHOOK_SECRET` identical in the dashboard
+and `server/.env`.
+
 No live credentials, gateway calls or real test transaction were used during
 this phase. The API and frontend were checked at code level; a Razorpay test
 account, a transaction-capable MongoDB and a publicly reachable webhook URL are
@@ -191,6 +218,58 @@ standalone MongoDB; it never falls back to a non-transactional order path that
 could leave stock and orders out of sync. Local single-node MongoDB servers
 normally need to be started as a single-node replica set before checkout can be
 used.
+
+## Deployment
+
+The API is a long-running Node service, so use a host that keeps a process
+alive (Render Web Service, Railway, or similar) rather than a serverless
+frontend host. The recommended setup is MongoDB Atlas + Render + Vercel; see
+the [project README](../README.md#deployment) for the full walkthrough.
+
+Backend service settings:
+
+| Setting | Value |
+| --- | --- |
+| Root directory | `server` |
+| Build command | `npm ci` |
+| Start command | `npm start` |
+| Health check path | `/api/health` |
+| Node version | 20 or newer |
+
+Environment variables to set in the host dashboard:
+
+```text
+NODE_ENV=production
+MONGODB_URI=<Atlas connection string>
+CLIENT_ORIGIN=https://<frontend origin>
+JWT_SECRET=<32+ random characters>
+JWT_EXPIRES_IN=7d
+COOKIE_SAME_SITE=none
+RAZORPAY_KEY_ID=rzp_test_...
+RAZORPAY_KEY_SECRET=<test key secret>
+RAZORPAY_WEBHOOK_SECRET=<webhook secret>
+```
+
+`PORT` is supplied by Render/Railway; do not set it manually. In production the
+API refuses to start without `MONGODB_URI`, a 32+ character `JWT_SECRET`, and a
+valid `CLIENT_ORIGIN`.
+
+Use `COOKIE_SAME_SITE=none` when the storefront and API are on different sites
+(for example `*.vercel.app` and `*.onrender.com`); HTTPS is required and the
+cookie is forced `Secure` in production. If both use subdomains of one
+registrable domain, `lax` is preferable. Production trusts one reverse-proxy
+hop so the auth rate limiter sees visitor IPs; adjust that in `src/app.js` only
+if you add another proxy/CDN.
+
+After deployment:
+
+- Health: `https://<api-host>/api/health` (expect `status: ok` and a connected
+  database).
+- Webhook: `https://<api-host>/api/payments/razorpay/webhook`, subscribed to
+  `payment.captured`, `order.paid` and `payment.failed`, with the same secret as
+  `RAZORPAY_WEBHOOK_SECRET`.
+- Recheck the health endpoint after every environment change and redeploy the
+  frontend after changing `VITE_API_BASE_URL` (Vite embeds it at build time).
 
 ## Manual administrator promotion
 
