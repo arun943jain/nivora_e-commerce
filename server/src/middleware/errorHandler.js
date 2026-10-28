@@ -26,6 +26,32 @@ export const errorHandler = (error, req, res, next) => {
     });
   }
 
+  if (error?.name === "ValidationError") {
+    const firstError = Object.values(error.errors || {})[0];
+
+    return res.status(400).json({
+      success: false,
+      message: firstError?.message || "The submitted data is invalid.",
+    });
+  }
+
+  if (error?.code === 11000) {
+    const field =
+      Object.keys(error.keyPattern || error.keyValue || {})[0] || "value";
+
+    return res.status(409).json({
+      success: false,
+      message: `A record with that ${field} already exists.`,
+    });
+  }
+
+  if (error?.name === "CastError") {
+    return res.status(400).json({
+      success: false,
+      message: "The submitted identifier is invalid.",
+    });
+  }
+
   const requestedStatus = Number(error.statusCode || error.status) || 500;
   const statusCode =
     requestedStatus >= 400 && requestedStatus <= 599 ? requestedStatus : 500;

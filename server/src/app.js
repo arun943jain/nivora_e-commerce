@@ -4,6 +4,7 @@ import helmet from "helmet";
 import morgan from "morgan";
 import { env } from "./config/env.js";
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler.js";
+import adminRouter from "./routes/admin.js";
 import authRouter from "./routes/auth.js";
 import cartRouter from "./routes/cart.js";
 import catalogueRouter from "./routes/catalogue.js";
@@ -31,6 +32,7 @@ app.use(express.json({ limit: "100kb" }));
 
 app.use("/api/health", healthRouter);
 app.use("/api/auth", authRouter);
+app.use("/api/admin", adminRouter);
 app.use("/api/cart", cartRouter);
 app.use("/api/orders", ordersRouter);
 app.use("/api", catalogueRouter);

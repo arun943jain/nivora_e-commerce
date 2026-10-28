@@ -106,3 +106,57 @@ export const serializeOrder = (order) => {
     updatedAt: order.updatedAt,
   };
 };
+
+const ORDER_STATUS_TRANSITIONS = {
+  Pending: ["Preparing", "Cancelled"],
+  Preparing: ["Shipped", "Cancelled"],
+  Shipped: ["Delivered"],
+  Delivered: [],
+  Cancelled: [],
+};
+
+export const allowedOrderTransitions = (status) =>
+  ORDER_STATUS_TRANSITIONS[status] || [];
+
+export const serializeAdminOrder = (order) => ({
+  ...serializeOrder(order),
+  user: order.user ? String(order.user) : null,
+  allowedTransitions: allowedOrderTransitions(order.status || "Pending"),
+});
+
+export const serializeAdminProduct = (product) => ({
+  ...serializeProduct(product),
+  // Admin routes operate on the database identifier, while the storefront
+  // keeps using the stable productId.
+  id: String(product._id),
+  productId: product.productId,
+  categoryId: product.category?._id
+    ? String(product.category._id)
+    : String(product.category || ""),
+});
+
+export const serializeAdminUser = (user) => ({
+  id: String(user._id),
+  name: user.name,
+  email: user.email,
+  role: user.role,
+  status: user.status,
+  joinedAt: user.joinedAt,
+  lastLoginAt: user.lastLoginAt || null,
+  createdAt: user.createdAt,
+});
+
+export const serializeAdminCoupon = (coupon) => ({
+  id: String(coupon._id),
+  code: coupon.code,
+  description: coupon.description || "",
+  discountType: coupon.discountType,
+  amount: coupon.amount,
+  minimumOrder: coupon.minimumOrder || 0,
+  expiresAt: coupon.expiresAt,
+  status: coupon.status,
+  usageLimit: coupon.usageLimit ?? null,
+  usedCount: coupon.usedCount || 0,
+  createdAt: coupon.createdAt,
+  updatedAt: coupon.updatedAt,
+});

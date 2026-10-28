@@ -68,6 +68,50 @@ cart on sign-in without exceeding stock.
 Only cash on delivery is supported. No payment provider is called and no
 online payment is implied.
 
+## Protected administration API
+
+Every route below is mounted under `/api/admin` and passes through
+`requireAuth` and `requireAdmin`. The role is read from MongoDB on each request;
+a browser-supplied role or local-storage value is never trusted. Responses are
+marked `Cache-Control: no-store`.
+
+| Method | Path                               | Notes                                                        |
+| ------ | ---------------------------------- | ------------------------------------------------------------ |
+| GET    | `/api/admin/dashboard`             | Server-calculated summary for `range`.                       |
+| GET    | `/api/admin/products`              | Lists products with server-side search, status and sorting.  |
+| POST   | `/api/admin/products`              | Creates a product after validating category, prices, stock, SKU, slug, image URLs and status. |
+| PATCH  | `/api/admin/products/:id`          | Updates allowed product fields.                              |
+| DELETE | `/api/admin/products/:id`          | Archives a product by setting `status` to `Draft`.           |
+| GET    | `/api/admin/orders`                | Lists orders with customer, status and payment fields.       |
+| GET    | `/api/admin/orders/:id`            | Returns one order by order number or database id.            |
+| PATCH  | `/api/admin/orders/:id/status`     | Moves an order through an allowed status transition.         |
+| GET    | `/api/admin/users`                 | Lists safe user fields only; password hashes are never selected. |
+| PATCH  | `/api/admin/users/:id`             | Updates role or status with self-lockout and last-admin guards. |
+| GET    | `/api/admin/coupons`               | Lists coupons with server-side search, status and sorting.   |
+| POST   | `/api/admin/coupons`               | Creates a coupon and validates discount, minimum, expiry and usage-limit rules. |
+| PATCH  | `/api/admin/coupons/:id`           | Updates allowed coupon fields; usage counts are rejected.    |
+| DELETE | `/api/admin/coupons/:id`           | Deactivates a coupon instead of deleting it.                 |
+
+Products referenced by historical orders are archived rather than deleted, so
+order snapshots and references remain intact. Only products with
+`status: "Active"` appear in the public catalogue.
+
+Order status updates use an explicit transition list:
+`Pending → Preparing | Cancelled`, `Preparing → Shipped | Cancelled`,
+`Shipped → Delivered`, and no outgoing transitions from `Delivered` or
+`Cancelled`. A same-status request is accepted as a no-op. Status updates never
+write item prices, customer snapshots, totals or payment status; payment status
+remains read-only until a payment provider exists.
+
+Coupon updates cannot change `usedCount`, and the API rejects attempts to set
+it. A percentage discount cannot exceed 100, a usage limit cannot fall below
+the recorded usage, and deactivation sets `status: "inactive"`.
+
+Dashboard sales totals are aggregated in MongoDB and exclude cancelled orders.
+The endpoint returns counts, status and daily order activity, recent order
+summaries, and top active products; it does not expose customer addresses,
+emails or other sensitive fields beyond the order list itself.
+
 ### Transaction requirement
 
 Placing an order decrements stock, increments coupon usage, creates the order

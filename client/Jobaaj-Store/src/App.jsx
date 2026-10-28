@@ -1,5 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  createAdminCoupon,
+  createAdminProduct,
+  deactivateAdminCoupon,
+  deactivateAdminProduct,
+  updateAdminCoupon,
+  updateAdminOrderStatus,
+  updateAdminProduct,
+  updateAdminUser,
+} from "./api/admin.js";
+import {
   addCartItem,
   fetchCart,
   mergeCart,
@@ -20,9 +30,10 @@ import {
 import { useAuth } from "./auth/authContext.js";
 import AuthGate from "./components/AuthGate.jsx";
 import CatalogueStatus from "./components/CatalogueStatus.jsx";
-import { categories, products, orders, users, coupons } from "./data/store.js";
+import { categories, products } from "./data/store.js";
 import DemoNotice from "./components/DemoNotice.jsx";
 import OrderConfirmation from "./components/OrderConfirmation.jsx";
+import useAdminWorkspace from "./hooks/useAdminWorkspace.js";
 import useCatalogueListing from "./hooks/useCatalogueListing.js";
 import "./App.css";
 
@@ -55,12 +66,6 @@ const formatDate = (value = new Date()) => {
     year: "numeric",
   }).format(Number.isNaN(date.getTime()) ? new Date() : date);
 };
-const slugify = (value) =>
-  String(value)
-    .toLowerCase()
-    .trim()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/(^-|-$)/g, "");
 const decodeSegment = (value) => {
   try {
     return decodeURIComponent(value);
@@ -105,8 +110,6 @@ function App() {
   const [query, setQuery] = useState("");
   const [mobile, setMobile] = useState(false);
   const [notice, setNotice] = useState("");
-  const [selected, setSelected] = useState(null);
-  const [modal, setModal] = useState("");
   const [coupon, setCoupon] = useState("");
   const [sort, setSort] = useState("featured");
   const [category, setCategory] = useState(() => {
@@ -116,17 +119,6 @@ function App() {
     return categories.some((c) => c.name === cat) ? cat : "All";
   });
   const [minPrice, setMinPrice] = useState(0);
-  const [range, setRange] = useState("This month");
-  const [productList, setProductList] = useState(() =>
-    read("nivora-admin-products", products),
-  );
-  const [orderList, setOrderList] = useState(() =>
-    read("nivora-orders", orders),
-  );
-  const [userList, setUserList] = useState(() => read("nivora-users", users));
-  const [couponList, setCouponList] = useState(() =>
-    read("nivora-coupons", coupons),
-  );
   const [reviews, setReviews] = useState(() => read("nivora-reviews", {}));
   const [catalogue, setCatalogue] = useState({
     products: null,
@@ -151,8 +143,8 @@ function App() {
   const shopProducts = useMemo(
     () =>
       catalogue.products ??
-      (IS_DEVELOPMENT && catalogue.status === "fallback" ? productList : []),
-    [catalogue.products, catalogue.status, productList],
+      (IS_DEVELOPMENT && catalogue.status === "fallback" ? products : []),
+    [catalogue.products, catalogue.status],
   );
   const storefrontProducts = useMemo(
     () => shopProducts.filter((product) => product.status !== "Draft"),
@@ -198,10 +190,6 @@ function App() {
     }
   }, [cart, cartSource]);
   useEffect(() => save("nivora-wishlist", wish), [wish]);
-  useEffect(() => save("nivora-admin-products", productList), [productList]);
-  useEffect(() => save("nivora-orders", orderList), [orderList]);
-  useEffect(() => save("nivora-users", userList), [userList]);
-  useEffect(() => save("nivora-coupons", couponList), [couponList]);
   useEffect(() => save("nivora-reviews", reviews), [reviews]);
   useEffect(() => {
     if (authStatus === "loading") return undefined;
@@ -463,6 +451,8 @@ function App() {
     }));
     setCatalogueAttempt((current) => current + 1);
   };
+  const refreshCatalogue = () =>
+    setCatalogueAttempt((current) => current + 1);
   const retryProductDetail = () => {
     setProductDetail({
       slug: productSlug,
@@ -613,7 +603,7 @@ function App() {
   const isAdmin = routePath.startsWith("/admin") && session?.role === "admin";
   const filtered = useMemo(
     () =>
-      productList
+      products
         .filter(
           (product) =>
             product.status !== "Draft" &&
@@ -633,7 +623,7 @@ function App() {
                 ? b.rating - a.rating
                 : Number(b.featured) - Number(a.featured),
         ),
-    [category, minPrice, productList, query, sort],
+    [category, minPrice, query, sort],
   );
 
   const signOut = async () => {
@@ -690,44 +680,6 @@ function App() {
     setNotice(`Order ${order.id} placed`);
     return order;
   };
-  const saveProduct = (product) => {
-    setProductList((items) =>
-      items.some((item) => item.id === product.id)
-        ? items.map((item) => (item.id === product.id ? product : item))
-        : [product, ...items],
-    );
-  };
-  const deleteProduct = (id) => {
-    setProductList((items) => items.filter((item) => item.id !== id));
-    if (!session) {
-      setCart((items) => items.filter((item) => item.id !== id));
-    }
-    setWish((items) => items.filter((item) => item !== id));
-    setReviews((items) => {
-      const next = { ...items };
-      delete next[id];
-      return next;
-    });
-  };
-  const saveCoupon = (nextCoupon) => {
-    setCouponList((items) =>
-      items.some((item) => item.id === nextCoupon.id)
-        ? items.map((item) =>
-            item.id === nextCoupon.id ? nextCoupon : item,
-          )
-        : [nextCoupon, ...items],
-    );
-  };
-  const deleteCoupon = (id) =>
-    setCouponList((items) => items.filter((item) => item.id !== id));
-  const updateOrder = (id, patch) =>
-    setOrderList((items) =>
-      items.map((item) => (item.id === id ? { ...item, ...patch } : item)),
-    );
-  const updateUser = (id, patch) =>
-    setUserList((items) =>
-      items.map((item) => (item.id === id ? { ...item, ...patch } : item)),
-    );
 
   return (
     <div className="app-shell">
@@ -982,17 +934,14 @@ function App() {
             <Admin
               key={routePath}
               route={routePath}
-              products={productList}
-              orders={orderList}
-              users={userList}
-              coupons={couponList}
               session={session}
-              setModal={setModal}
-              setSelected={setSelected}
-              range={range}
-              setRange={setRange}
-              onDeleteProduct={deleteProduct}
-              onDeleteCoupon={deleteCoupon}
+              setNotice={setNotice}
+              categories={
+                catalogueCategories.length
+                  ? catalogueCategories
+                  : categories
+              }
+              onCatalogueChanged={refreshCatalogue}
             />
           ) : (
             <AuthGate
@@ -1026,20 +975,6 @@ function App() {
         <div className="toast" role="status">
           {notice}
         </div>
-      )}
-      {modal && (
-        <Modal
-          type={modal}
-          close={() => setModal("")}
-          products={productList}
-          selected={selected}
-          session={session}
-          onSaveProduct={saveProduct}
-          onSaveCoupon={saveCoupon}
-          onUpdateOrder={updateOrder}
-          onUpdateUser={updateUser}
-          setNotice={setNotice}
-        />
       )}
     </div>
   );
@@ -2983,117 +2918,211 @@ function Footer({ setNotice }) {
     </footer>
   );
 }
-function Admin({
-  route,
-  products,
-  orders,
-  users,
-  coupons,
-  session,
-  setModal,
-  setSelected,
-  range,
-  setRange,
-  onDeleteProduct,
-  onDeleteCoupon,
-}) {
-  const items =
-    route === "/admin/products"
-      ? products
-      : route === "/admin/orders"
-        ? orders
-        : route === "/admin/users"
-          ? users
-          : route === "/admin/coupons"
-            ? coupons
-            : [];
-  const title = route.includes("products")
-    ? "Products"
-    : route.includes("orders")
-      ? "Orders"
-      : route.includes("users")
-        ? "Customers"
-        : route.includes("coupons")
-          ? "Coupons"
-          : "Overview";
+const ADMIN_SECTIONS = {
+  products: {
+    title: "Products",
+    caption:
+      "Manage the live catalogue. Archived products stay linked to past orders.",
+    note: "Products are archived (set to Draft) instead of deleted, so historical orders keep their references.",
+    statuses: [
+      ["Active", "Active"],
+      ["Draft", "Archived"],
+    ],
+    columns: [
+      { label: "Product", sort: "name" },
+      { label: "Category", sort: "category" },
+      { label: "Price", sort: "price" },
+      { label: "Stock", sort: "stock" },
+      { label: "Status", sort: "status" },
+    ],
+  },
+  orders: {
+    title: "Orders",
+    caption:
+      "Inspect orders and move them through the allowed fulfilment steps.",
+    note: "Order totals, item snapshots and payment status are read-only. Only the listed status transitions are allowed.",
+    statuses: [
+      ["Pending", "Pending"],
+      ["Preparing", "Preparing"],
+      ["Shipped", "Shipped"],
+      ["Delivered", "Delivered"],
+      ["Cancelled", "Cancelled"],
+    ],
+    columns: [
+      { label: "Order", sort: "id" },
+      { label: "Customer", sort: "customer" },
+      { label: "Date", sort: "createdAt" },
+      { label: "Total", sort: "total" },
+      { label: "Status", sort: "status" },
+      { label: "Payment", sort: "paymentStatus" },
+    ],
+  },
+  users: {
+    title: "Customers",
+    caption:
+      "Only the account fields the workspace needs are returned by the server.",
+    note: "Password hashes and secrets are never returned. Self-demotion, self-suspension and removal of the last active administrator are blocked.",
+    statuses: [
+      ["active", "Active"],
+      ["suspended", "Suspended"],
+    ],
+    columns: [
+      { label: "Name", sort: "name" },
+      { label: "Email", sort: "email" },
+      { label: "Joined", sort: "joinedAt" },
+      { label: "Role", sort: "role" },
+      { label: "Status", sort: "status" },
+    ],
+  },
+  coupons: {
+    title: "Coupons",
+    caption:
+      "Create and retire discount codes. Usage is recorded by orders, not edited here.",
+    note: "Coupons are deactivated instead of deleted. Usage counts and order totals cannot be changed from this workspace.",
+    statuses: [
+      ["active", "Active"],
+      ["inactive", "Inactive"],
+    ],
+    columns: [
+      { label: "Code", sort: "code" },
+      { label: "Type", sort: "discountType" },
+      { label: "Value", sort: "amount" },
+      { label: "Expiry", sort: "expiresAt" },
+      { label: "Minimum", sort: "minimumOrder" },
+      { label: "Status", sort: "status" },
+    ],
+  },
+};
+
+const ADMIN_STATUS_LABELS = {
+  products: { Active: "Active", Draft: "Archived" },
+  orders: {
+    Pending: "Pending",
+    Preparing: "Preparing",
+    Shipped: "Shipped",
+    Delivered: "Delivered",
+    Cancelled: "Cancelled",
+  },
+  users: { active: "Active", suspended: "Suspended" },
+  coupons: { active: "Active", inactive: "Inactive" },
+};
+
+const adminSectionKey = (route) => {
+  const normalized = String(route || "").replace(/\/+$/, "") || "/";
+  if (normalized === "/admin/products") return "products";
+  if (normalized === "/admin/orders") return "orders";
+  if (normalized === "/admin/users") return "users";
+  if (normalized === "/admin/coupons") return "coupons";
+  return "dashboard";
+};
+
+const adminStatusLabel = (section, status) =>
+  ADMIN_STATUS_LABELS[section]?.[status] || status || "—";
+
+const adminRoleLabel = (role) =>
+  role === "admin" ? "Administrator" : "Customer";
+
+const adminDiscountLabel = (type) =>
+  type === "percentage" ? "Percentage" : "Fixed amount";
+
+const adminDate = (value) => (value ? formatDate(value) : "—");
+
+const adminDateInputValue = (value) => {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${date.getFullYear()}-${month}-${day}`;
+};
+
+function Admin({ route, session, setNotice, categories, onCatalogueChanged }) {
+  const sectionKey = adminSectionKey(route);
+  const isDashboard = sectionKey === "dashboard";
+  const section = isDashboard ? null : ADMIN_SECTIONS[sectionKey];
   const [search, setSearch] = useState("");
-  const [filter, setFilter] = useState("All");
+  const [statusFilter, setStatusFilter] = useState("");
   const [sortKey, setSortKey] = useState("");
   const [sortDirection, setSortDirection] = useState("asc");
+  const [range, setRange] = useState("This month");
+  const [editor, setEditor] = useState(null);
+  const [busyId, setBusyId] = useState("");
+  const [actionError, setActionError] = useState("");
+  const workspace = useAdminWorkspace({
+    route,
+    range,
+    search,
+    status: statusFilter,
+    sort: sortKey,
+    direction: sortKey ? sortDirection : "",
+  });
 
-  const filterOptions = route.includes("products")
-    ? ["Active", "Draft"]
-    : route.includes("orders")
-      ? ["Pending", "Preparing", "Shipped", "Delivered", "Cancelled"]
-      : route.includes("users")
-        ? ["Active", "Suspended"]
-        : ["Active", "Inactive"];
-  const columns = route.includes("products")
-    ? [
-        ["Product", "name"],
-        ["category", "category"],
-        ["price", "price"],
-        ["stock", "stock"],
-        ["status", "status"],
-      ]
-    : route.includes("orders")
-      ? [
-          ["Order", "id"],
-          ["customer", "customer"],
-          ["date", "date"],
-          ["total", "total"],
-          ["status", "status"],
-          ["payment", "payment"],
-        ]
-      : route.includes("users")
-        ? [
-            ["name", "name"],
-            ["email", "email"],
-            ["joined", "joined"],
-            ["role", "role"],
-            ["status", "status"],
-          ]
-        : [
-            ["code", "code"],
-            ["type", "type"],
-            ["value", "value"],
-            ["expiry", "expiry"],
-            ["minimum", "minimum"],
-            ["status", "status"],
-          ];
-  const shown = items
-    .filter(
-      (item) =>
-        JSON.stringify(item).toLowerCase().includes(search.toLowerCase()) &&
-        (filter === "All" || item.status === filter),
-    )
-    .sort((a, b) => {
-      if (!sortKey) return 0;
-      const left = a[sortKey];
-      const right = b[sortKey];
-      const comparison =
-        typeof left === "number" && typeof right === "number"
-          ? left - right
-          : String(left || "").localeCompare(String(right || ""));
-      return sortDirection === "asc" ? comparison : -comparison;
-    });
-  const openEditor = (row) => {
-    setSelected(row);
-    setModal(
-      route.includes("products")
-        ? "product"
-        : route.includes("coupons")
-          ? "coupon"
-          : route.includes("orders")
-            ? "order"
-            : "user",
-    );
+  const toggleSort = (key) => {
+    if (sortKey === key) {
+      setSortDirection((current) => (current === "asc" ? "desc" : "asc"));
+      return;
+    }
+
+    setSortKey(key);
+    setSortDirection("asc");
   };
-  const removeRow = (row) => {
-    if (!window.confirm(`Remove ${row.name || row.code || row.id}?`)) return;
-    if (route.includes("products")) onDeleteProduct(row.id);
-    if (route.includes("coupons")) onDeleteCoupon(row.id);
+
+  const handleSaved = (message, { catalogue = false } = {}) => {
+    setNotice(message);
+    setEditor(null);
+    setActionError("");
+    workspace.refresh();
+
+    if (catalogue) {
+      onCatalogueChanged();
+    }
   };
+
+  const archiveProduct = async (row) => {
+    if (
+      !window.confirm(
+        `Archive ${row.name}? It will disappear from the storefront but stay linked to past orders.`,
+      )
+    ) {
+      return;
+    }
+
+    setBusyId(row.id);
+    setActionError("");
+
+    try {
+      await deactivateAdminProduct(row.id);
+      setNotice(`${row.name} archived`);
+      onCatalogueChanged();
+      workspace.refresh();
+    } catch (error) {
+      setActionError(error?.message || "The product could not be archived.");
+    } finally {
+      setBusyId("");
+    }
+  };
+
+  const deactivateCoupon = async (row) => {
+    if (!window.confirm(`Deactivate coupon ${row.code}?`)) return;
+
+    setBusyId(row.id);
+    setActionError("");
+
+    try {
+      await deactivateAdminCoupon(row.id);
+      setNotice(`Coupon ${row.code} deactivated`);
+      workspace.refresh();
+    } catch (error) {
+      setActionError(error?.message || "The coupon could not be deactivated.");
+    } finally {
+      setBusyId("");
+    }
+  };
+
+  const title = isDashboard ? "Overview" : section.title;
+  const recordsLabel = `${workspace.total} record${
+    workspace.total === 1 ? "" : "s"
+  }`;
 
   return (
     <div className="admin-shell">
@@ -3103,7 +3132,10 @@ function Admin({
           <small>STUDIO</small>
         </a>
         <p>WORKSPACE</p>
-        <a className={route === "/admin" ? "current" : ""} href="#/admin">
+        <a
+          className={sectionKey === "dashboard" ? "current" : ""}
+          href="#/admin"
+        >
           ▦　Overview
         </a>
         <a
@@ -3133,7 +3165,7 @@ function Admin({
         <div className="admin-sidebar-bottom">
           <a href="#/">← View storefront</a>
           <small>{session.email}</small>
-          <small>Preview workspace · local demo data</small>
+          <small>Protected workspace</small>
         </div>
       </aside>
       <div className="admin-main">
@@ -3158,52 +3190,73 @@ function Admin({
         <div className="admin-content">
           <div className="admin-heading">
             <div>
-              <p className="eyebrow">NIVORA STUDIO · SAMPLE DATA</p>
+              <p className="eyebrow">NIVORA STUDIO · LIVE DATA</p>
               <h1>{title}</h1>
               <p className="muted">
-                {route === "/admin"
-                  ? "A snapshot of the demo shop. These figures are illustrative only."
-                  : "Manage the demonstration catalogue and records."}
+                {isDashboard
+                  ? "A server-calculated summary of the selected period."
+                  : section.caption}
               </p>
             </div>
-            {route === "/admin" && (
-              <select value={range} onChange={(e) => setRange(e.target.value)}>
+            {isDashboard && (
+              <select
+                aria-label="Dashboard date range"
+                value={range}
+                onChange={(event) => setRange(event.target.value)}
+              >
                 <option>This month</option>
                 <option>Last month</option>
                 <option>Last 90 days</option>
               </select>
             )}
-            {route.includes("products") && (
+            {sectionKey === "products" && (
               <button
                 type="button"
                 className="button primary"
-                onClick={() => {
-                  setSelected(null);
-                  setModal("product");
-                }}
+                onClick={() => setEditor({ type: "product", row: null })}
               >
                 ＋ Add product
               </button>
             )}
-            {route.includes("coupons") && (
+            {sectionKey === "coupons" && (
               <button
                 type="button"
                 className="button primary"
-                onClick={() => {
-                  setSelected(null);
-                  setModal("coupon");
-                }}
+                onClick={() => setEditor({ type: "coupon", row: null })}
               >
                 ＋ Create coupon
               </button>
             )}
           </div>
-          <DemoNotice>
-            Admin changes are stored in this browser only. They are not saved to
-            a server and will not appear for other visitors.
-          </DemoNotice>
-          {route === "/admin" ? (
-            <Dashboard products={products} orders={orders} />
+          {!isDashboard && <DemoNotice>{section.note}</DemoNotice>}
+          {actionError && (
+            <DemoNotice tone="error">{actionError}</DemoNotice>
+          )}
+          {isDashboard &&
+            workspace.status === "loading" &&
+            workspace.summary && (
+              <p className="muted">Updating summary…</p>
+            )}
+          {isDashboard ? (
+            workspace.status === "error" ? (
+              <div className="empty-state">
+                <h2>Could not load the overview</h2>
+                <p>{workspace.error}</p>
+                <button
+                  type="button"
+                  className="button primary"
+                  onClick={workspace.retry}
+                >
+                  Try again
+                </button>
+              </div>
+            ) : workspace.summary ? (
+              <Dashboard summary={workspace.summary} />
+            ) : (
+              <div className="empty-state">
+                <h2>Loading overview…</h2>
+              </div>
+            )
           ) : (
             <>
               <div className="table-tools">
@@ -3215,230 +3268,324 @@ function Admin({
                 />
                 <select
                   aria-label={`Filter ${title.toLowerCase()} by status`}
-                  value={filter}
-                  onChange={(event) => setFilter(event.target.value)}
+                  value={statusFilter}
+                  onChange={(event) => setStatusFilter(event.target.value)}
                 >
-                  <option>All</option>
-                  {filterOptions.map((option) => (
-                    <option key={option}>{option}</option>
+                  <option value="">All statuses</option>
+                  {section.statuses.map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
                   ))}
                 </select>
-                <span>{shown.length} records · local demo</span>
+                <span>
+                  {workspace.status === "loading"
+                    ? "Loading…"
+                    : recordsLabel}
+                </span>
               </div>
-              <div className="data-table-wrap">
-                <table className="data-table">
-                  <caption className="sr-only">
-                    {title} stored in this browser for the demo
-                  </caption>
-                  <thead>
-                    <tr>
-                      {columns.map(([label, key]) => (
-                        <th key={key}>
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (sortKey === key) {
-                                setSortDirection((current) =>
-                                  current === "asc" ? "desc" : "asc",
-                                );
-                              } else {
-                                setSortKey(key);
-                                setSortDirection("asc");
-                              }
-                            }}
-                            aria-label={`Sort by ${label}`}
-                          >
-                            {label.charAt(0).toUpperCase() + label.slice(1)}{" "}
-                            {sortKey === key
-                              ? sortDirection === "asc"
-                                ? "↑"
-                                : "↓"
-                              : "↕"}
-                          </button>
-                        </th>
-                      ))}
-                      <th>Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {shown.map((row) => (
-                      <tr key={row.id}>
-                        {route.includes("products") ? (
-                          <>
-                            <td className="table-product">
-                              <img
-                                src={row.image || FALLBACK_IMAGE}
-                                alt=""
-                                onError={(event) => {
-                                  event.currentTarget.src = FALLBACK_IMAGE;
-                                }}
-                              />
-                              <span>
-                                {row.name}
-                                <small>{row.sku}</small>
-                              </span>
-                            </td>
-                            <td>{row.category}</td>
-                            <td>{currency(row.price)}</td>
-                            <td>{row.stock}</td>
-                            <td>
-                              <span className="status-pill">
-                                {row.status || "Active"}
-                              </span>
-                            </td>
-                          </>
-                        ) : route.includes("orders") ? (
-                          <>
-                            <td>{row.id}</td>
-                            <td>{row.customer}</td>
-                            <td>{row.date}</td>
-                            <td>{currency(row.total)}</td>
-                            <td>
-                              <span className="status-pill">{row.status}</span>
-                            </td>
-                            <td>{row.payment}</td>
-                          </>
-                        ) : route.includes("users") ? (
-                          <>
-                            <td>{row.name}</td>
-                            <td>{row.email}</td>
-                            <td>{row.joined}</td>
-                            <td>{row.role}</td>
-                            <td>
-                              <span className="status-pill">{row.status}</span>
-                            </td>
-                          </>
-                        ) : (
-                          <>
-                            <td>{row.code}</td>
-                            <td>{row.type}</td>
-                            <td>{row.value}</td>
-                            <td>{row.expiry}</td>
-                            <td>{currency(row.minimum)}</td>
-                            <td>
-                              <span className="status-pill">{row.status}</span>
-                            </td>
-                          </>
-                        )}
-                        <td>
-                          <button
-                            type="button"
-                            className="table-action"
-                            onClick={() => openEditor(row)}
-                          >
-                            {route.includes("orders")
-                              ? "Update"
-                              : route.includes("users")
-                                ? "View"
-                                : "Edit"}
-                          </button>
-                          {(route.includes("products") ||
-                            route.includes("coupons")) && (
+              {workspace.status === "error" && (
+                <div className="empty-state">
+                  <h2>Could not load {title.toLowerCase()}</h2>
+                  <p>{workspace.error}</p>
+                  <button
+                    type="button"
+                    className="button primary"
+                    onClick={workspace.retry}
+                  >
+                    Try again
+                  </button>
+                </div>
+              )}
+              {workspace.status === "loading" &&
+                workspace.items.length === 0 && (
+                  <div className="empty-state">
+                    <h2>Loading {title.toLowerCase()}…</h2>
+                  </div>
+                )}
+              {workspace.status === "ready" &&
+                workspace.items.length === 0 && (
+                  <div className="empty-state">
+                    <h2>
+                      {search || statusFilter
+                        ? "No records match."
+                        : `No ${title.toLowerCase()} yet.`}
+                    </h2>
+                  </div>
+                )}
+              {workspace.items.length > 0 && (
+                <div className="data-table-wrap">
+                  <table className="data-table">
+                    <caption className="sr-only">
+                      {title} loaded from the protected admin API
+                    </caption>
+                    <thead>
+                      <tr>
+                        {section.columns.map((column) => (
+                          <th key={column.sort}>
                             <button
                               type="button"
-                              className="table-action danger"
-                              onClick={() => removeRow(row)}
+                              onClick={() => toggleSort(column.sort)}
+                              aria-label={`Sort by ${column.label}`}
                             >
-                              Delete
+                              {column.label}{" "}
+                              {sortKey === column.sort
+                                ? sortDirection === "asc"
+                                  ? "↑"
+                                  : "↓"
+                                : "↕"}
                             </button>
-                          )}
-                        </td>
+                          </th>
+                        ))}
+                        <th>Actions</th>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-              {!shown.length && (
-                <div className="empty-state">
-                  <h2>No records match.</h2>
+                    </thead>
+                    <tbody>
+                      {workspace.items.map((row) => (
+                        <tr key={row.id}>
+                          {sectionKey === "products" ? (
+                            <>
+                              <td className="table-product">
+                                <img
+                                  src={row.image || FALLBACK_IMAGE}
+                                  alt=""
+                                  onError={(event) => {
+                                    event.currentTarget.src = FALLBACK_IMAGE;
+                                  }}
+                                />
+                                <span>
+                                  {row.name}
+                                  <small>
+                                    {row.sku} · {row.productId}
+                                  </small>
+                                </span>
+                              </td>
+                              <td>{row.category || "—"}</td>
+                              <td>{currency(row.price)}</td>
+                              <td>{row.stock}</td>
+                              <td>
+                                <span className="status-pill">
+                                  {adminStatusLabel(sectionKey, row.status)}
+                                </span>
+                              </td>
+                            </>
+                          ) : sectionKey === "orders" ? (
+                            <>
+                              <td>{row.id}</td>
+                              <td>{row.customer || "—"}</td>
+                              <td>{adminDate(row.createdAt)}</td>
+                              <td>{currency(row.total)}</td>
+                              <td>
+                                <span className="status-pill">
+                                  {adminStatusLabel(sectionKey, row.status)}
+                                </span>
+                              </td>
+                              <td>{row.paymentStatus || "Pending"}</td>
+                            </>
+                          ) : sectionKey === "users" ? (
+                            <>
+                              <td>{row.name}</td>
+                              <td>{row.email}</td>
+                              <td>{adminDate(row.joinedAt || row.createdAt)}</td>
+                              <td>{adminRoleLabel(row.role)}</td>
+                              <td>
+                                <span className="status-pill">
+                                  {adminStatusLabel(sectionKey, row.status)}
+                                </span>
+                              </td>
+                            </>
+                          ) : (
+                            <>
+                              <td>{row.code}</td>
+                              <td>{adminDiscountLabel(row.discountType)}</td>
+                              <td>
+                                {row.discountType === "percentage"
+                                  ? `${row.amount}%`
+                                  : currency(row.amount)}
+                              </td>
+                              <td>
+                                {row.expiresAt
+                                  ? formatDate(row.expiresAt)
+                                  : "No expiry"}
+                              </td>
+                              <td>{currency(row.minimumOrder)}</td>
+                              <td>
+                                <span className="status-pill">
+                                  {adminStatusLabel(sectionKey, row.status)}
+                                </span>
+                              </td>
+                            </>
+                          )}
+                          <td>
+                            <button
+                              type="button"
+                              className="table-action"
+                              onClick={() =>
+                                setEditor({ type: sectionKey, row })
+                              }
+                            >
+                              {sectionKey === "orders"
+                                ? "Inspect"
+                                : sectionKey === "users"
+                                  ? "Manage"
+                                  : "Edit"}
+                            </button>
+                            {sectionKey === "products" &&
+                              row.status !== "Draft" && (
+                                <button
+                                  type="button"
+                                  className="table-action danger"
+                                  disabled={busyId === row.id}
+                                  onClick={() => archiveProduct(row)}
+                                >
+                                  {busyId === row.id
+                                    ? "Archiving…"
+                                    : "Archive"}
+                                </button>
+                              )}
+                            {sectionKey === "coupons" &&
+                              row.status === "active" && (
+                                <button
+                                  type="button"
+                                  className="table-action danger"
+                                  disabled={busyId === row.id}
+                                  onClick={() => deactivateCoupon(row)}
+                                >
+                                  {busyId === row.id
+                                    ? "Deactivating…"
+                                    : "Deactivate"}
+                                </button>
+                              )}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               )}
             </>
           )}
         </div>
       </div>
+      {editor && (
+        <AdminModal
+          type={editor.type}
+          row={editor.row}
+          categories={categories}
+          session={session}
+          close={() => setEditor(null)}
+          onSaved={handleSaved}
+        />
+      )}
     </div>
   );
 }
-function Dashboard({ products, orders }) {
-  const grossSales = orders.reduce(
-    (total, order) => total + Number(order.total || 0),
+
+function Dashboard({ summary }) {
+  const orders = summary.orders || {};
+  const products = summary.products || {};
+  const users = summary.users || {};
+  const coupons = summary.coupons || {};
+  const statusOrder = [
+    "Pending",
+    "Preparing",
+    "Shipped",
+    "Delivered",
+    "Cancelled",
+  ];
+  const statusCounts = statusOrder.map((status) => [
+    status,
+    Number(orders.byStatus?.[status] || 0),
+  ]);
+  const maxStatus = Math.max(1, ...statusCounts.map(([, count]) => count));
+  const daily = Array.isArray(orders.byDay) ? orders.byDay : [];
+  const maxDaily = Math.max(1, ...daily.map((day) => Number(day.count) || 0));
+  const weeklyOrders = daily.reduce(
+    (total, day) => total + Number(day.count || 0),
     0,
   );
-  const averageOrder = orders.length
-    ? Math.round(grossSales / orders.length)
-    : 0;
+  const recent = Array.isArray(orders.recent) ? orders.recent : [];
+  const topProducts = Array.isArray(summary.topProducts)
+    ? summary.topProducts
+    : [];
   const stats = [
-    ["Demo sales", currency(grossSales), "From orders stored in this browser"],
-    ["Orders", String(orders.length), "Local demo order records"],
-    ["Average order", currency(averageOrder), "Based on local demo orders"],
     [
-      "Items in catalogue",
-      String(products.length),
-      `Across ${categories.length} collections`,
+      "Gross sales",
+      currency(orders.grossSales || 0),
+      "Excludes cancelled orders",
+    ],
+    [
+      "Orders",
+      String(orders.total || 0),
+      `${orders.completedOrders || 0} non-cancelled in range`,
+    ],
+    [
+      "Average order",
+      currency(orders.averageOrder || 0),
+      "Average of non-cancelled orders",
+    ],
+    [
+      "Active products",
+      String(products.active || 0),
+      `${products.archived || 0} archived · ${products.categories || 0} collections`,
     ],
   ];
-  const bars = [38, 54, 47, 71, 63, 82, 58, 73, 89, 66, 78, 95];
+
   return (
     <>
       <div className="kpi-grid">
-        {stats.map(([a, b, c]) => (
-          <div className="kpi-card" key={a}>
-            <span>{a}</span>
-            <b>{b}</b>
-            <small>{c}</small>
+        {stats.map(([label, value, detail]) => (
+          <div className="kpi-card" key={label}>
+            <span>{label}</span>
+            <b>{value}</b>
+            <small>{detail}</small>
           </div>
         ))}
       </div>
+      <p className="muted" style={{ marginTop: 10 }}>
+        {users.total || 0} accounts · {users.admins || 0} active
+        administrators · {coupons.active || 0} active coupons
+      </p>
       <div className="charts-grid">
         <section className="chart-panel">
           <div className="chart-head">
             <div>
-              <h2>Sales overview</h2>
-              <small>Illustrative revenue · ₹ thousands</small>
+              <h2>Orders by status</h2>
+              <small>Server summary for the selected range</small>
             </div>
-            <span>Last 12 months</span>
+            <span>{orders.total || 0} orders</span>
           </div>
           <div className="bar-chart">
-            {bars.map((n, i) => (
-              <div className="bar-column" key={i}>
-                <div style={{ height: `${n}%` }} />
-                <small>
-                  {
-                    [
-                      "Nov",
-                      "Dec",
-                      "Jan",
-                      "Feb",
-                      "Mar",
-                      "Apr",
-                      "May",
-                      "Jun",
-                      "Jul",
-                      "Aug",
-                      "Sep",
-                      "Oct",
-                    ][i]
-                  }
-                </small>
+            {statusCounts.map(([status, count]) => (
+              <div className="bar-column" key={status}>
+                <div
+                  style={{
+                    height: `${Math.max(6, Math.round((count / maxStatus) * 100))}%`,
+                  }}
+                />
+                <small>{status}</small>
               </div>
             ))}
           </div>
         </section>
         <section className="chart-panel activity-panel">
           <h2>Order activity</h2>
-          <small>Illustrative weekly activity</small>
+          <small>Orders created in the last 7 days</small>
           <div className="activity-bars">
-            {[42, 70, 54, 86, 62, 100, 76].map((n, i) => (
-              <div key={i}>
-                <div style={{ height: `${n}%` }} />
-                <small>{["M", "T", "W", "T", "F", "S", "S"][i]}</small>
+            {daily.map((day) => (
+              <div key={day.date}>
+                <div
+                  style={{
+                    height: `${Math.max(6, Math.round(((Number(day.count) || 0) / maxDaily) * 100))}%`,
+                  }}
+                />
+                <small>{day.label}</small>
               </div>
             ))}
           </div>
           <div className="activity-legend">
             <span />
-            Orders this week <b>68</b>
+            Orders this week <b>{weeklyOrders}</b>
           </div>
         </section>
       </div>
@@ -3448,54 +3595,54 @@ function Dashboard({ products, orders }) {
             <h2>Recent orders</h2>
             <a href="#/admin/orders">View all ↗</a>
           </div>
-          {orders.slice(0, 4).map((order) => (
+          {recent.map((order) => (
             <div className="mini-row" key={order.id}>
               <span>
                 {order.id}
-                <small>{order.customer}</small>
+                <small>{order.customer || "Customer"}</small>
               </span>
               <span className="status-pill">{order.status}</span>
               <b>{currency(order.total)}</b>
             </div>
           ))}
-          {!orders.length && <p className="muted">No demo orders yet.</p>}
+          {!recent.length && (
+            <p className="muted">No orders in this range yet.</p>
+          )}
         </section>
         <section className="chart-panel">
           <div className="chart-head">
             <h2>Top pieces</h2>
             <a href="#/admin/products">Catalogue ↗</a>
           </div>
-          {products
-            .filter((p) => p.bestseller)
-            .slice(0, 4)
-            .map((p, i) => (
-              <div className="mini-row" key={p.id}>
-                <span className="rank">0{i + 1}</span>
-                <span>
-                  {p.name}
-                  <small>{p.category}</small>
-                </span>
-                <b>{p.stock} in stock</b>
-              </div>
-            ))}
+          {topProducts.map((product, index) => (
+            <div className="mini-row" key={product.id}>
+              <span className="rank">0{index + 1}</span>
+              <span>
+                {product.name}
+                <small>{product.category || "Uncategorised"}</small>
+              </span>
+              <b>{product.stock} in stock</b>
+            </div>
+          ))}
+          {!topProducts.length && (
+            <p className="muted">No active products yet.</p>
+          )}
         </section>
       </div>
     </>
   );
 }
-function Modal({
-  type,
-  close,
-  products,
-  selected,
-  session,
-  onSaveProduct,
-  onSaveCoupon,
-  onUpdateOrder,
-  onUpdateUser,
-  setNotice,
-}) {
-  const edit = selected;
+
+function AdminModal({ type, row, categories, session, close, onSaved }) {
+  const edit = row;
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const categoryNames = categories.map((category) => category.name);
+
+  if (edit?.category && !categoryNames.includes(edit.category)) {
+    categoryNames.unshift(edit.category);
+  }
+
   useEffect(() => {
     const onKeyDown = (event) => {
       if (event.key === "Escape") close();
@@ -3519,17 +3666,23 @@ function Modal({
           ? "Edit coupon"
           : "Create coupon"
         : type === "order"
-          ? "Update order"
+          ? "Order details and status"
           : type === "user"
-            ? "Customer details"
+            ? "Manage customer"
             : "Record details";
-  const dateInputValue = (value) => {
-    if (!value) return "";
-    const date = new Date(value);
-    if (Number.isNaN(date.getTime())) return "";
-    const month = String(date.getMonth() + 1).padStart(2, "0");
-    const day = String(date.getDate()).padStart(2, "0");
-    return `${date.getFullYear()}-${month}-${day}`;
+
+  const save = async (event, action) => {
+    event.preventDefault();
+    setBusy(true);
+    setError("");
+
+    try {
+      await action(new FormData(event.currentTarget));
+    } catch (caught) {
+      setError(caught?.message || "The change could not be saved.");
+    } finally {
+      setBusy(false);
+    }
   };
 
   return (
@@ -3554,82 +3707,57 @@ function Modal({
         >
           ×
         </button>
-        <p className="eyebrow">Nivora Studio · local demo</p>
+        <p className="eyebrow">Nivora Studio · protected</p>
         <h2 id="modal-title">{title}</h2>
-        <DemoNotice>
-          Changes here update local demo state in this browser only. They are
-          not sent to a server.
-        </DemoNotice>
+        {error && <DemoNotice tone="error">{error}</DemoNotice>}
 
         {type === "product" ? (
           <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              const data = new FormData(event.currentTarget);
-              const name = String(data.get("name") || "").trim();
-              const image =
-                String(data.get("image") || "").trim() ||
-                edit?.image ||
-                FALLBACK_IMAGE;
-              const featured = data.get("featured") === "on";
-              const material =
-                String(data.get("material") || "").trim() || "See details";
-              let slug = slugify(name);
-              let suffix = 2;
-              while (
-                products.some(
-                  (product) =>
-                    product.slug === slug && product.id !== edit?.id,
-                )
-              ) {
-                slug = `${slugify(name)}-${suffix}`;
-                suffix += 1;
-              }
-              const product = {
-                ...(edit || {}),
-                id: edit?.id || `NV-${Date.now().toString().slice(-5)}`,
-                name,
-                slug,
-                description: String(data.get("description") || "").trim(),
-                price: Number(data.get("price")) || 0,
-                compareAtPrice: data.get("compareAtPrice")
-                  ? Number(data.get("compareAtPrice"))
-                  : null,
-                category: String(data.get("category") || "Decor"),
-                sku: String(data.get("sku") || "").trim(),
-                stock: Number(data.get("stock")) || 0,
-                status: String(data.get("status") || "Active"),
-                image,
-                images:
-                  edit && image === edit.image ? edit.images || [] : [image],
-                material,
-                featured,
-                badge: featured
-                  ? edit?.badge || "Nivora favourite"
-                  : edit?.badge || "",
-                bestseller: edit?.bestseller || false,
-                rating: edit?.rating || 0,
-                reviewCount: edit?.reviewCount || 0,
-                specifications: edit?.specifications || {
-                  Material: material,
-                  Care: "Wipe gently with a soft, dry cloth",
-                  Origin: "Designed in India",
-                },
-              };
-              onSaveProduct(product);
-              setNotice("Product saved in this browser (demo only)");
-              close();
-            }}
+            onSubmit={(event) =>
+              save(event, async (data) => {
+                const image = String(data.get("image") || "").trim();
+                const payload = {
+                  name: String(data.get("name") || "").trim(),
+                  description: String(data.get("description") || "").trim(),
+                  category: String(data.get("category") || ""),
+                  price: Number(data.get("price")),
+                  compareAtPrice: data.get("compareAtPrice")
+                    ? Number(data.get("compareAtPrice"))
+                    : null,
+                  stock: Number(data.get("stock")),
+                  sku: String(data.get("sku") || "").trim(),
+                  status: String(data.get("status") || "Active"),
+                  material: String(data.get("material") || "").trim(),
+                  featured: data.get("featured") === "on",
+                  image,
+                };
+                const record = edit
+                  ? await updateAdminProduct(edit.id, payload)
+                  : await createAdminProduct(payload);
+
+                onSaved(
+                  `${record.name} ${edit ? "updated" : "created"}.`,
+                  { catalogue: true },
+                );
+              })
+            }
           >
             <label>
               Product name
-              <input name="name" required defaultValue={edit?.name} autoFocus />
+              <input
+                name="name"
+                required
+                maxLength={160}
+                defaultValue={edit?.name}
+                autoFocus
+              />
             </label>
             <label>
               Description
               <textarea
                 name="description"
                 required
+                maxLength={4000}
                 defaultValue={edit?.description}
               />
             </label>
@@ -3639,9 +3767,10 @@ function Modal({
                 <input
                   name="price"
                   type="number"
-                  min="1"
+                  min="0"
+                  step="0.01"
                   required
-                  defaultValue={edit?.price}
+                  defaultValue={edit?.price ?? ""}
                 />
               </label>
               <label>
@@ -3650,20 +3779,35 @@ function Modal({
                   name="compareAtPrice"
                   type="number"
                   min="0"
+                  step="0.01"
                   defaultValue={edit?.compareAtPrice ?? ""}
                 />
               </label>
               <label>
                 Category
-                <select name="category" defaultValue={edit?.category || "Decor"}>
-                  {categories.map((category) => (
-                    <option key={category.name}>{category.name}</option>
+                <select
+                  name="category"
+                  required
+                  defaultValue={edit?.category || categoryNames[0] || ""}
+                >
+                  {!categoryNames.length && (
+                    <option value="">No active categories</option>
+                  )}
+                  {categoryNames.map((category) => (
+                    <option key={category} value={category}>
+                      {category}
+                    </option>
                   ))}
                 </select>
               </label>
               <label>
                 SKU
-                <input name="sku" required defaultValue={edit?.sku} />
+                <input
+                  name="sku"
+                  required
+                  maxLength={60}
+                  defaultValue={edit?.sku}
+                />
               </label>
               <label>
                 Stock
@@ -3671,6 +3815,7 @@ function Modal({
                   name="stock"
                   type="number"
                   min="0"
+                  step="1"
                   required
                   defaultValue={edit?.stock ?? 0}
                 />
@@ -3678,19 +3823,23 @@ function Modal({
               <label>
                 Status
                 <select name="status" defaultValue={edit?.status || "Active"}>
-                  <option>Active</option>
-                  <option>Draft</option>
+                  <option value="Active">Active</option>
+                  <option value="Draft">Draft (hidden)</option>
                 </select>
               </label>
               <label>
                 Material
-                <input name="material" defaultValue={edit?.material} />
+                <input
+                  name="material"
+                  maxLength={200}
+                  defaultValue={edit?.material}
+                />
               </label>
               <label className="radio-row">
                 <input
                   name="featured"
                   type="checkbox"
-                  defaultChecked={edit?.featured}
+                  defaultChecked={Boolean(edit?.featured)}
                 />
                 Featured on homepage
                 <small>Appears in the featured collection when active.</small>
@@ -3701,63 +3850,68 @@ function Modal({
               <input
                 name="image"
                 type="url"
+                required
+                maxLength={2048}
                 defaultValue={edit?.image}
                 placeholder="https://images.example.com/product.jpg"
               />
               <small>
-                Use an existing image URL. Cloudinary upload is not connected.
+                Use an existing HTTPS image URL. Uploads are not connected.
               </small>
             </label>
             <div className="modal-actions">
               <button type="button" className="button outline" onClick={close}>
                 Cancel
               </button>
-              <button type="submit" className="button primary">
-                Save product
+              <button type="submit" className="button primary" disabled={busy}>
+                {busy ? "Saving…" : "Save product"}
               </button>
             </div>
           </form>
         ) : type === "coupon" ? (
           <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              const data = new FormData(event.currentTarget);
-              const discountType = String(data.get("discountType"));
-              const amount = Number(data.get("value")) || 0;
-              const expiry = String(data.get("expiry"));
-              const expiryDate = expiry
-                ? new Date(`${expiry}T12:00:00`)
-                : null;
-              const coupon = {
-                ...(edit || {}),
-                id: edit?.id || `C-${Date.now().toString().slice(-5)}`,
-                code: String(data.get("code") || "")
-                  .trim()
-                  .toUpperCase(),
-                type: discountType,
-                value:
-                  discountType === "Percentage"
-                    ? `${amount}%`
-                    : currency(amount),
-                expiry: expiryDate ? formatDate(expiryDate) : "",
-                minimum: Number(data.get("minimum")) || 0,
-                usageLimit: data.get("usageLimit")
-                  ? Number(data.get("usageLimit"))
-                  : null,
-                status: String(data.get("status") || "Active"),
-              };
-              onSaveCoupon(coupon);
-              setNotice("Coupon saved in this browser (demo only)");
-              close();
-            }}
+            onSubmit={(event) =>
+              save(event, async (data) => {
+                const expiry = String(data.get("expiresAt") || "");
+                const usageLimit = String(data.get("usageLimit") || "");
+                const payload = {
+                  code: String(data.get("code") || "").trim().toUpperCase(),
+                  description: String(data.get("description") || "").trim(),
+                  discountType: String(data.get("discountType") || "percentage"),
+                  amount: Number(data.get("amount")),
+                  minimumOrder: Number(data.get("minimumOrder")) || 0,
+                  expiresAt: expiry
+                    ? new Date(`${expiry}T23:59:59`).toISOString()
+                    : null,
+                  usageLimit: usageLimit ? Number(usageLimit) : null,
+                  status: String(data.get("status") || "active"),
+                };
+                const record = edit
+                  ? await updateAdminCoupon(edit.id, payload)
+                  : await createAdminCoupon(payload);
+
+                onSaved(
+                  `Coupon ${record.code} ${edit ? "updated" : "created"}.`,
+                );
+              })
+            }
           >
             <label>
               Coupon code
               <input
                 name="code"
                 required
+                maxLength={40}
                 defaultValue={edit?.code}
                 autoFocus
+              />
+            </label>
+            <label>
+              Description
+              <input
+                name="description"
+                maxLength={200}
+                defaultValue={edit?.description}
               />
             </label>
             <div className="field-grid">
@@ -3765,42 +3919,39 @@ function Modal({
                 Discount type
                 <select
                   name="discountType"
-                  defaultValue={edit?.type || "Percentage"}
+                  defaultValue={edit?.discountType || "percentage"}
                 >
-                  <option>Percentage</option>
-                  <option>Fixed amount</option>
+                  <option value="percentage">Percentage</option>
+                  <option value="fixed">Fixed amount</option>
                 </select>
               </label>
               <label>
                 Discount value
                 <input
-                  name="value"
+                  name="amount"
                   required
                   type="number"
-                  min="1"
-                  defaultValue={
-                    edit?.value
-                      ? String(edit.value).replace(/[^\d.]/g, "")
-                      : ""
-                  }
+                  min="0"
+                  step="0.01"
+                  defaultValue={edit?.amount ?? ""}
                 />
               </label>
               <label>
                 Expiration date
                 <input
-                  name="expiry"
-                  required
+                  name="expiresAt"
                   type="date"
-                  defaultValue={dateInputValue(edit?.expiry)}
+                  defaultValue={adminDateInputValue(edit?.expiresAt)}
                 />
               </label>
               <label>
                 Minimum order (₹)
                 <input
-                  name="minimum"
+                  name="minimumOrder"
                   type="number"
                   min="0"
-                  defaultValue={edit?.minimum ?? 0}
+                  step="0.01"
+                  defaultValue={edit?.minimumOrder ?? 0}
                 />
               </label>
               <label>
@@ -3809,42 +3960,70 @@ function Modal({
                   name="usageLimit"
                   type="number"
                   min="1"
+                  step="1"
                   defaultValue={edit?.usageLimit ?? ""}
                 />
               </label>
               <label>
                 Status
-                <select name="status" defaultValue={edit?.status || "Active"}>
-                  <option>Active</option>
-                  <option>Inactive</option>
+                <select
+                  name="status"
+                  defaultValue={edit?.status || "active"}
+                >
+                  <option value="active">Active</option>
+                  <option value="inactive">Inactive</option>
                 </select>
               </label>
             </div>
+            {edit && (
+              <p className="muted">
+                Used {edit.usedCount || 0} time
+                {edit.usedCount === 1 ? "" : "s"}. Usage is recorded by orders
+                and cannot be edited here.
+              </p>
+            )}
             <div className="modal-actions">
               <button type="button" className="button outline" onClick={close}>
                 Cancel
               </button>
-              <button type="submit" className="button primary">
-                Save coupon
+              <button type="submit" className="button primary" disabled={busy}>
+                {busy ? "Saving…" : "Save coupon"}
               </button>
             </div>
           </form>
         ) : type === "order" ? (
           <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              const data = new FormData(event.currentTarget);
-              onUpdateOrder(edit.id, {
-                status: String(data.get("status")),
-                paymentStatus: String(data.get("paymentStatus")),
-              });
-              setNotice("Order updated in this browser (demo only)");
-              close();
-            }}
+            onSubmit={(event) =>
+              save(event, async (data) => {
+                const nextStatus = String(data.get("status") || edit.status);
+
+                if (nextStatus === edit.status) {
+                  onSaved(`Order ${edit.id} left unchanged.`);
+                  return;
+                }
+
+                await updateAdminOrderStatus(edit.id, nextStatus);
+                onSaved(`Order ${edit.id} moved to ${nextStatus}.`);
+              })
+            }
           >
             <p>
-              <b>{edit.id}</b> · {edit.customer} · {edit.date} ·{" "}
-              {currency(edit.total)}
+              <b>{edit.id}</b> · {adminDate(edit.createdAt)}
+            </p>
+            <p>
+              {edit.customerDetails?.name || edit.customer || "Customer"}
+              {edit.customerDetails?.email ? (
+                <>
+                  <br />
+                  {edit.customerDetails.email}
+                </>
+              ) : null}
+              {edit.customerDetails?.phone ? (
+                <>
+                  <br />
+                  {edit.customerDetails.phone}
+                </>
+              ) : null}
             </p>
             {edit.address ? (
               <p>
@@ -3854,88 +4033,138 @@ function Modal({
                 <br />
                 {edit.address.city}, {edit.address.state}{" "}
                 {edit.address.postalCode}
+                <br />
+                {edit.address.country}
               </p>
             ) : (
-              <p>No address recorded for this sample order.</p>
+              <p>No shipping address recorded.</p>
             )}
-            <p>
-              Items:{" "}
-              {(edit.items || [])
-                .map((item) => `${item.name} × ${item.qty}`)
-                .join(", ")}
+            <div>
+              <p>
+                <b>Items</b>
+              </p>
+              {(edit.items || []).map((item) => (
+                <p
+                  className="muted"
+                  key={`${item.id}-${item.sku}-${item.name}`}
+                >
+                  {item.name} × {item.quantity} — {currency(item.lineTotal)}
+                </p>
+              ))}
+              {!(edit.items || []).length && (
+                <p className="muted">No line items recorded.</p>
+              )}
+            </div>
+            <p className="muted">
+              Subtotal {currency(edit.subtotal || 0)} · Discount{" "}
+              {currency(edit.discount || 0)} · Shipping{" "}
+              {currency(edit.shipping || 0)} ·{" "}
+              <b>Total {currency(edit.total || 0)}</b>
             </p>
-            <p>Payment method: {edit.payment || "Not recorded"}</p>
+            <p className="muted">
+              Payment method: {edit.paymentMethod || "Not recorded"}
+              {edit.couponCode ? ` · Coupon ${edit.couponCode}` : ""}
+            </p>
             <div className="field-grid">
               <label>
                 Order status
-                <select name="status" defaultValue={edit.status || "Pending"}>
-                  {["Pending", "Preparing", "Shipped", "Delivered", "Cancelled"].map(
-                    (status) => (
-                      <option key={status}>{status}</option>
-                    ),
-                  )}
+                <select
+                  name="status"
+                  defaultValue={edit.status || "Pending"}
+                  disabled={
+                    !(edit.allowedTransitions || []).length
+                  }
+                >
+                  {[edit.status, ...(edit.allowedTransitions || [])]
+                    .filter(
+                      (status, index, list) =>
+                        status && list.indexOf(status) === index,
+                    )
+                    .map((status) => (
+                      <option key={status} value={status}>
+                        {status}
+                      </option>
+                    ))}
                 </select>
               </label>
               <label>
-                Payment status
-                <select
-                  name="paymentStatus"
-                  defaultValue={edit.paymentStatus || "Pending"}
-                >
-                  {["Pending", "Paid (demo)", "Refunded"].map((status) => (
-                    <option key={status}>{status}</option>
-                  ))}
-                </select>
+                Payment status (read-only)
+                <input
+                  value={edit.paymentStatus || "Pending"}
+                  disabled
+                  readOnly
+                />
               </label>
             </div>
+            {!(edit.allowedTransitions || []).length && (
+              <DemoNotice>
+                No further status changes are allowed for this order.
+              </DemoNotice>
+            )}
             <div className="modal-actions">
               <button type="button" className="button outline" onClick={close}>
                 Cancel
               </button>
-              <button type="submit" className="button primary">
-                Save order status
+              <button
+                type="submit"
+                className="button primary"
+                disabled={busy || !(edit.allowedTransitions || []).length}
+              >
+                {busy ? "Saving…" : "Save order status"}
               </button>
             </div>
           </form>
         ) : type === "user" ? (
           <form
-            onSubmit={(event) => {
-              event.preventDefault();
-              const data = new FormData(event.currentTarget);
-              onUpdateUser(edit.id, {
-                role: String(data.get("role")),
-                status: String(data.get("status")),
-              });
-              setNotice("Customer record updated in this browser (demo only)");
-              close();
-            }}
+            onSubmit={(event) =>
+              save(event, async (data) => {
+                const role = String(data.get("role") || edit.role);
+                const status = String(data.get("status") || edit.status);
+                await updateAdminUser(edit.id, { role, status });
+                onSaved(`${edit.name} updated.`);
+              })
+            }
           >
             <p>
               <b>{edit.name}</b>
               <br />
               {edit.email}
               <br />
-              Joined {edit.joined}
+              Joined {adminDate(edit.joinedAt || edit.createdAt)}
+              {edit.lastLoginAt ? (
+                <>
+                  <br />
+                  Last signed in {adminDate(edit.lastLoginAt)}
+                </>
+              ) : null}
             </p>
-            {session?.email === edit.email.toLowerCase() && (
-              <DemoNotice tone="error">
-                This is the currently signed-in demo account. Role changes apply
-                to local data only and will not update this session.
+            {String(edit.id) === String(session.id) && (
+              <DemoNotice>
+                This is your own account. Your administrator role and active
+                status cannot be removed here.
               </DemoNotice>
             )}
             <div className="field-grid">
               <label>
                 Role
-                <select name="role" defaultValue={edit.role || "Customer"}>
-                  <option>Customer</option>
-                  <option>Admin</option>
+                <select
+                  name="role"
+                  defaultValue={edit.role || "customer"}
+                  disabled={String(edit.id) === String(session.id)}
+                >
+                  <option value="customer">Customer</option>
+                  <option value="admin">Administrator</option>
                 </select>
               </label>
               <label>
                 Status
-                <select name="status" defaultValue={edit.status || "Active"}>
-                  <option>Active</option>
-                  <option>Suspended</option>
+                <select
+                  name="status"
+                  defaultValue={edit.status || "active"}
+                  disabled={String(edit.id) === String(session.id)}
+                >
+                  <option value="active">Active</option>
+                  <option value="suspended">Suspended</option>
                 </select>
               </label>
             </div>
@@ -3943,14 +4172,18 @@ function Modal({
               <button type="button" className="button outline" onClick={close}>
                 Cancel
               </button>
-              <button type="submit" className="button primary">
-                Save customer
+              <button
+                type="submit"
+                className="button primary"
+                disabled={busy || String(edit.id) === String(session.id)}
+              >
+                {busy ? "Saving…" : "Save customer"}
               </button>
             </div>
           </form>
         ) : (
           <div>
-            <p>This record cannot be edited in the local demo.</p>
+            <p>This record cannot be edited here.</p>
             <button type="button" className="button outline" onClick={close}>
               Close
             </button>
@@ -3960,6 +4193,7 @@ function Modal({
     </div>
   );
 }
+
 function NotFound() {
   return (
     <div className="empty-state not-found">
