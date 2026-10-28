@@ -1,9 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
+import {
+  fetchCategories,
+  fetchProductBySlug,
+  fetchProducts,
+} from "./api/catalogue.js";
+import CatalogueStatus from "./components/CatalogueStatus.jsx";
 import { categories, products, orders, users, coupons } from "./data/store.js";
 import DemoGate from "./components/DemoGate.jsx";
 import DemoNotice from "./components/DemoNotice.jsx";
 import OrderConfirmation from "./components/OrderConfirmation.jsx";
+import useCatalogueListing from "./hooks/useCatalogueListing.js";
 import "./App.css";
+
+const IS_DEVELOPMENT = import.meta.env.DEV;
 
 const FALLBACK_IMAGE =
   "https://images.unsplash.com/photo-1490312278390-ab64016e0aa9?auto=format&fit=crop&w=700&q=80";
@@ -94,6 +103,48 @@ function App() {
   );
   const [reviews, setReviews] = useState(() => read("nivora-reviews", {}));
   const [session, setSession] = useState(() => read("nivora-session", null));
+  const [catalogue, setCatalogue] = useState({
+    products: null,
+    categories: null,
+    status: "loading",
+    error: "",
+  });
+  const [catalogueAttempt, setCatalogueAttempt] = useState(0);
+  const [productDetail, setProductDetail] = useState({
+    slug: "",
+    status: "idle",
+    product: null,
+    error: "",
+  });
+  const [productAttempt, setProductAttempt] = useState(0);
+
+  const routePath = route.split("?")[0];
+  const routeQuery = new URLSearchParams(route.split("?")[1] || "");
+  const nextPath = routeQuery.get("next") || "";
+  const productSlug = decodeSegment(routePath.split("/")[2] || "");
+  const isProductRoute = routePath.startsWith("/product/");
+  const shopProducts = useMemo(
+    () =>
+      catalogue.products ??
+      (IS_DEVELOPMENT && catalogue.status === "fallback" ? productList : []),
+    [catalogue.products, catalogue.status, productList],
+  );
+  const storefrontProducts = useMemo(
+    () => shopProducts.filter((product) => product.status !== "Draft"),
+    [shopProducts],
+  );
+  const catalogueCategories =
+    catalogue.categories ??
+    (IS_DEVELOPMENT && catalogue.status === "fallback" ? categories : []);
+  const matchedProductDetail =
+    productDetail.slug === productSlug ? productDetail : null;
+  const productDetailStatus = !isProductRoute
+    ? "idle"
+    : !productSlug
+      ? "not-found"
+      : matchedProductDetail?.status || "loading";
+  const detailProduct = matchedProductDetail?.product || null;
+  const detailError = matchedProductDetail?.error || "";
 
   useEffect(() => {
     const onHash = () => {
@@ -120,6 +171,95 @@ function App() {
   useEffect(() => save("nivora-reviews", reviews), [reviews]);
   useEffect(() => save("nivora-session", session), [session]);
   useEffect(() => {
+    const controller = new AbortController();
+
+    Promise.all([
+      fetchCategories({ signal: controller.signal }),
+      fetchProducts({
+        limit: 60,
+        sort: "featured",
+        signal: controller.signal,
+      }),
+    ])
+      .then(([categoryItems, result]) => {
+        setCatalogue({
+          products: result.products,
+          categories: categoryItems,
+          status: "ready",
+          error: "",
+        });
+      })
+      .catch((error) => {
+        if (controller.signal.aborted) return;
+
+        setCatalogue({
+          products: null,
+          categories: null,
+          status: IS_DEVELOPMENT ? "fallback" : "error",
+          error:
+            error.message ||
+            "The catalogue could not be loaded. Please try again.",
+        });
+      });
+
+    return () => controller.abort();
+  }, [catalogueAttempt]);
+  useEffect(() => {
+    if (!isProductRoute || !productSlug) return undefined;
+
+    const controller = new AbortController();
+    const knownProduct =
+      storefrontProducts.find((product) => product.slug === productSlug) ||
+      products.find(
+        (product) => product.slug === productSlug && product.status !== "Draft",
+      ) ||
+      null;
+
+    fetchProductBySlug(productSlug, { signal: controller.signal })
+      .then((product) => {
+        setProductDetail({
+          slug: productSlug,
+          status: "ready",
+          product,
+          error: "",
+        });
+      })
+      .catch((error) => {
+        if (controller.signal.aborted) return;
+
+        if (IS_DEVELOPMENT && knownProduct) {
+          setProductDetail({
+            slug: productSlug,
+            status: "fallback",
+            product: knownProduct,
+            error: error.message,
+          });
+          return;
+        }
+
+        if (!IS_DEVELOPMENT && error.status !== 404) {
+          setProductDetail({
+            slug: productSlug,
+            status: "error",
+            product: null,
+            error:
+              error.message ||
+              "The product could not be loaded. Please try again.",
+          });
+          return;
+        }
+
+        setProductDetail({
+          slug: productSlug,
+          status: "not-found",
+          product: null,
+          error: "",
+        });
+      });
+
+    return () => controller.abort();
+  }, [isProductRoute, productSlug, productAttempt, storefrontProducts]);
+  useEffect(() => {
     if (!notice) return;
     const timer = setTimeout(() => setNotice(""), 3000);
     return () => clearTimeout(timer);
@@ -128,8 +268,25 @@ function App() {
   const go = (next) => {
     location.hash = next;
   };
+  const retryCatalogue = () => {
+    setCatalogue((current) => ({
+      ...current,
+      status: "loading",
+      error: "",
+    }));
+    setCatalogueAttempt((current) => current + 1);
+  };
+  const retryProductDetail = () => {
+    setProductDetail({
+      slug: productSlug,
+      status: "loading",
+      product: null,
+      error: "",
+    });
+    setProductAttempt((current) => current + 1);
+  };
   const add = (id, qty = 1) => {
-    const product = productList.find((item) => item.id === id);
+    const product = shopProducts.find((item) => item.id === id);
     if (!product || product.stock <= 0) {
       setNotice("This piece is currently out of stock");
       return;
@@ -165,7 +322,7 @@ function App() {
     );
   };
   const quantity = (id, delta) => {
-    const max = productList.find((item) => item.id === id)?.stock || 1;
+    const max = shopProducts.find((item) => item.id === id)?.stock || 1;
     setCart((items) =>
       items.map((item) =>
         item.id === id
@@ -178,19 +335,9 @@ function App() {
   const subtotal = cart.reduce(
     (total, item) =>
       total +
-      (productList.find((product) => product.id === item.id)?.price || 0) *
+      (shopProducts.find((product) => product.id === item.id)?.price || 0) *
         item.qty,
     0,
-  );
-  const routePath = route.split("?")[0];
-  const routeQuery = new URLSearchParams(route.split("?")[1] || "");
-  const nextPath = routeQuery.get("next") || "";
-  const productSlug = decodeSegment(routePath.split("/")[2] || "");
-  const storefrontProducts = productList.filter(
-    (product) => product.status !== "Draft",
-  );
-  const currentProduct = storefrontProducts.find(
-    (product) => product.slug === productSlug,
   );
   const currentOrderId = routePath.startsWith("/orders/")
     ? decodeSegment(routePath.split("/")[2] || "")
@@ -206,7 +353,7 @@ function App() {
             (category === "All" || product.category === category) &&
             product.price >= minPrice &&
             (!query ||
-              `${product.name} ${product.category} ${product.material} ${product.description}`
+              `${product.name} ${product.category} ${product.material} ${product.badge || ""} ${product.description}`
                 .toLowerCase()
                 .includes(query.toLowerCase())),
         )
@@ -269,7 +416,7 @@ function App() {
   const placeOrder = (details) => {
     const items = cart
       .map((row) => {
-        const product = productList.find((item) => item.id === row.id);
+        const product = shopProducts.find((item) => item.id === row.id);
         return product
           ? {
               id: product.id,
@@ -436,6 +583,10 @@ function App() {
         {routePath === "/" && (
           <Home
             products={storefrontProducts}
+            categories={catalogueCategories}
+            catalogueStatus={catalogue.status}
+            catalogueError={catalogue.error}
+            onRetry={retryCatalogue}
             add={add}
             wish={wish}
             toggleWish={toggleWish}
@@ -444,6 +595,7 @@ function App() {
         {(routePath === "/products" || routePath === "/search") && (
           <Listing
             filtered={filtered}
+            categories={catalogueCategories}
             add={add}
             category={category}
             setCategory={setCategory}
@@ -457,23 +609,47 @@ function App() {
             toggleWish={toggleWish}
           />
         )}
-        {routePath.startsWith("/product/") && (
-          <ProductDetail
-            key={currentProduct?.id || productSlug || "missing-product"}
-            product={currentProduct}
-            products={storefrontProducts}
-            add={add}
-            wish={wish}
-            toggleWish={toggleWish}
-            session={session}
-            reviews={reviews[currentProduct?.id] || []}
-            onAddReview={addReview}
-            setNotice={setNotice}
-          />
-        )}
+        {isProductRoute &&
+          (productDetailStatus === "error" ? (
+            <div className="page-container">
+              <div className="breadcrumbs">Home / Shop / Product</div>
+              <CatalogueStatus
+                status="error"
+                error={detailError}
+                onRetry={retryProductDetail}
+              />
+            </div>
+          ) : productDetailStatus === "not-found" ? (
+            <NotFound />
+          ) : detailProduct ? (
+            <ProductDetail
+              key={detailProduct.id || productSlug}
+              product={detailProduct}
+              products={storefrontProducts}
+              add={add}
+              wish={wish}
+              toggleWish={toggleWish}
+              session={session}
+              reviews={reviews[detailProduct.id] || []}
+              onAddReview={addReview}
+              setNotice={setNotice}
+              catalogueStatus={productDetailStatus}
+              catalogueError={detailError}
+              onRetry={retryProductDetail}
+            />
+          ) : (
+            <div className="page-container">
+              <div className="breadcrumbs">Home / Shop / Product</div>
+              <CatalogueStatus
+                status="loading"
+                loadingMessage="Loading product details…"
+                onRetry={retryProductDetail}
+              />
+            </div>
+          ))}
         {routePath === "/cart" && (
           <Cart
-            products={productList}
+            products={shopProducts}
             cart={cart}
             quantity={quantity}
             remove={remove}
@@ -491,7 +667,7 @@ function App() {
         )}
         {routePath === "/checkout" && (
           <Checkout
-            products={productList}
+            products={shopProducts}
             coupons={couponList}
             session={session}
             cart={cart}
@@ -657,7 +833,16 @@ function SectionTitle({ eyebrow, title, copy, action }) {
     </div>
   );
 }
-function Home({ products, add, wish, toggleWish }) {
+function Home({
+  products,
+  categories: displayCategories,
+  catalogueStatus,
+  catalogueError,
+  onRetry,
+  add,
+  wish,
+  toggleWish,
+}) {
   return (
     <>
       <section className="hero">
@@ -695,6 +880,14 @@ function Home({ products, add, wish, toggleWish }) {
           </div>
         </div>
       </section>
+      <div className="mx-auto w-full max-w-[var(--content)] px-[5.5%]">
+        <CatalogueStatus
+          status={catalogueStatus}
+          error={catalogueError}
+          onRetry={onRetry}
+          fallbackMessage="The live catalogue API is unavailable, so sample pieces from the local demo catalogue are being shown."
+        />
+      </div>
       <div className="trust-strip">
         <span>Considered materials</span>
         <i>·</i>
@@ -714,10 +907,10 @@ function Home({ products, add, wish, toggleWish }) {
           }
         />
         <div className="category-grid">
-          {categories.slice(0, 4).map((c, i) => (
+          {displayCategories.slice(0, 4).map((c, i) => (
             <a
               className={`category-tile category-${i}`}
-              href={`#/products?category=${c.name}`}
+              href={`#/products?category=${encodeURIComponent(c.name)}`}
               key={c.name}
             >
               <img loading="lazy" src={c.image} alt={c.name} />
@@ -845,6 +1038,7 @@ function ProductGrid({ items, add, wish, toggleWish }) {
 }
 function Listing({
   filtered,
+  categories: categoryOptions,
   add,
   category,
   setCategory,
@@ -858,6 +1052,13 @@ function Listing({
   toggleWish,
 }) {
   const [drawer, setDrawer] = useState(false);
+  const { items, status, error, retry } = useCatalogueListing({
+    category,
+    minPrice,
+    sort,
+    query,
+    fallbackItems: filtered,
+  });
   return (
     <div className="page-container">
       <div className="breadcrumbs">Home / Shop</div>
@@ -870,9 +1071,15 @@ function Listing({
           </p>
         </div>
         <span className="results-count" aria-live="polite">
-          {filtered.length} {filtered.length === 1 ? "piece" : "pieces"}
+          {items.length} {items.length === 1 ? "piece" : "pieces"}
         </span>
       </div>
+      <CatalogueStatus
+        status={status}
+        error={error}
+        onRetry={retry}
+        fallbackMessage="The live catalogue API is unavailable, so filtered sample pieces from the local demo catalogue are shown."
+      />
       <div className="listing-controls">
         <button
           type="button"
@@ -894,7 +1101,7 @@ function Listing({
               onChange={(e) => setCategory(e.target.value)}
             >
               <option>All</option>
-              {categories.map((c) => (
+              {categoryOptions.map((c) => (
                 <option key={c.name}>{c.name}</option>
               ))}
             </select>
@@ -930,14 +1137,14 @@ function Listing({
           </select>
         </label>
       </div>
-      {filtered.length ? (
+      {items.length ? (
         <ProductGrid
-          items={filtered}
+          items={items}
           add={add}
           wish={wish}
           toggleWish={toggleWish}
         />
-      ) : (
+      ) : status === "loading" || status === "error" ? null : (
         <div className="empty-state" role="status">
           <h2>No pieces found</h2>
           <p>Try a different search, category or minimum price.</p>
@@ -968,6 +1175,9 @@ function ProductDetail({
   reviews,
   onAddReview,
   setNotice,
+  catalogueStatus,
+  catalogueError,
+  onRetry,
 }) {
   const [image, setImage] = useState(0);
   const [qty, setQty] = useState(1);
@@ -1024,6 +1234,12 @@ function ProductDetail({
       <div className="breadcrumbs">
         Home / {p.category} / {p.name}
       </div>
+      <CatalogueStatus
+        status={catalogueStatus}
+        error={catalogueError}
+        onRetry={onRetry}
+        fallbackMessage="Live product details are unavailable, so this local catalogue preview is shown."
+      />
       <div className="detail-layout">
         <div className="gallery">
           <img
@@ -1141,7 +1357,7 @@ function ProductDetail({
           <p className="eyebrow">The conversation</p>
           <h2>Notes on this piece</h2>
           <p className="muted">
-            Sample catalogue ratings plus reviews saved in this browser.
+            Catalogue ratings plus reviews saved in this browser.
           </p>
         </div>
         <button

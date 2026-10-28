@@ -31,12 +31,12 @@ export const errorHandler = (error, req, res, next) => {
     requestedStatus >= 400 && requestedStatus <= 599 ? requestedStatus : 500;
   const isServerError = statusCode >= 500;
 
-  if (isServerError && !env.isProduction) {
+  if (isServerError && !env.isProduction && error.expose !== true) {
     console.error("[error]", error.stack || error.message);
   }
 
   const message =
-    isServerError && env.isProduction
+    isServerError && error.expose !== true
       ? "Internal server error."
       : error.message || "Request failed.";
 
