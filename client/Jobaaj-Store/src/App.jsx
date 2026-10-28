@@ -1,4 +1,17 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import {
+  addCartItem,
+  fetchCart,
+  mergeCart,
+  quoteCart,
+  removeCartItem,
+  updateCartItem,
+} from "./api/cart.js";
+import {
+  createOrder,
+  fetchOrderById,
+  fetchOrders,
+} from "./api/orders.js";
 import {
   fetchCategories,
   fetchProductBySlug,
@@ -34,12 +47,14 @@ const read = (key, fallback) => {
 };
 const save = (key, value) =>
   localStorage.setItem(key, JSON.stringify(value));
-const formatDate = (value = new Date()) =>
-  new Intl.DateTimeFormat("en-IN", {
+const formatDate = (value = new Date()) => {
+  const date = value instanceof Date ? value : new Date(value);
+  return new Intl.DateTimeFormat("en-IN", {
     day: "2-digit",
     month: "short",
     year: "numeric",
-  }).format(value);
+  }).format(Number.isNaN(date.getTime()) ? new Date() : date);
+};
 const slugify = (value) =>
   String(value)
     .toLowerCase()
@@ -57,22 +72,14 @@ const safeNextPath = (value) =>
   typeof value === "string" && value.startsWith("/") && !value.startsWith("//")
     ? value
     : "";
-const couponDiscount = (code, subtotal, couponList) => {
-  const normalized = String(code || "").trim().toUpperCase();
-  if (!normalized) return 0;
-  const coupon = couponList.find((item) => item.code.toUpperCase() === normalized);
-  if (!coupon || coupon.status !== "Active") return 0;
-  if (subtotal < Number(coupon.minimum || 0)) return 0;
-  if (coupon.expiry && new Date(coupon.expiry) < new Date()) return 0;
 
-  const raw = String(coupon.value);
-  if (raw.includes("%")) {
-    const percentage = Number.parseFloat(raw.replace(/[^\d.]/g, "")) || 0;
-    return Math.round((subtotal * percentage) / 100);
-  }
-  const amount = Number(raw.replace(/[^\d.]/g, "")) || 0;
-  return Math.min(subtotal, amount);
-};
+const EMPTY_SUMMARY = Object.freeze({
+  subtotal: 0,
+  discount: 0,
+  shipping: 0,
+  total: 0,
+  itemCount: 0,
+});
 
 function App() {
   const { user: session, status: authStatus, logout } = useAuth();
@@ -81,6 +88,19 @@ function App() {
     () => localStorage.getItem("nivora-theme") === "dark",
   );
   const [cart, setCart] = useState(() => read("nivora-cart", []));
+  const [cartSource, setCartSource] = useState("guest");
+  const [cartStatus, setCartStatus] = useState("ready");
+  const [cartError, setCartError] = useState("");
+  const [cartAttempt, setCartAttempt] = useState(0);
+  const [cartPending, setCartPending] = useState(false);
+  const [cartSummary, setCartSummary] = useState(EMPTY_SUMMARY);
+  const [serverOrders, setServerOrders] = useState({
+    status: "idle",
+    items: [],
+    error: "",
+  });
+  const [serverOrdersAttempt, setServerOrdersAttempt] = useState(0);
+  const mergedSessionRef = useRef("");
   const [wish, setWish] = useState(() => read("nivora-wishlist", []));
   const [query, setQuery] = useState("");
   const [mobile, setMobile] = useState(false);
@@ -172,13 +192,132 @@ function App() {
     localStorage.setItem("nivora-theme", dark ? "dark" : "light");
     document.documentElement.dataset.theme = dark ? "dark" : "light";
   }, [dark]);
-  useEffect(() => save("nivora-cart", cart), [cart]);
+  useEffect(() => {
+    if (cartSource === "guest") {
+      save("nivora-cart", cart);
+    }
+  }, [cart, cartSource]);
   useEffect(() => save("nivora-wishlist", wish), [wish]);
   useEffect(() => save("nivora-admin-products", productList), [productList]);
   useEffect(() => save("nivora-orders", orderList), [orderList]);
   useEffect(() => save("nivora-users", userList), [userList]);
   useEffect(() => save("nivora-coupons", couponList), [couponList]);
   useEffect(() => save("nivora-reviews", reviews), [reviews]);
+  useEffect(() => {
+    if (authStatus === "loading") return undefined;
+
+    if (!session) {
+      mergedSessionRef.current = "";
+      setCartSource("guest");
+      setCart(read("nivora-cart", []));
+      setCartStatus("ready");
+      setCartError("");
+      setCartSummary(EMPTY_SUMMARY);
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    let active = true;
+
+    setCartStatus("loading");
+    setCartError("");
+
+    const syncCart = async () => {
+      try {
+        const guestItems = read("nivora-cart", []).filter(
+          (row) =>
+            row &&
+            typeof row.id === "string" &&
+            Number.isInteger(row.qty) &&
+            row.qty > 0,
+        );
+        let nextCart;
+        let issues = [];
+
+        if (
+          guestItems.length > 0 &&
+          mergedSessionRef.current !== session.id
+        ) {
+          mergedSessionRef.current = session.id;
+
+          try {
+            const merged = await mergeCart(
+              guestItems.map((row) => ({
+                productId: row.id,
+                quantity: row.qty,
+              })),
+              { signal: controller.signal },
+            );
+            nextCart = merged.cart;
+            issues = merged.issues;
+            save("nivora-cart", []);
+          } catch (error) {
+            mergedSessionRef.current = "";
+            throw error;
+          }
+        } else {
+          nextCart = await fetchCart({ signal: controller.signal });
+        }
+
+        if (!active) return;
+
+        applyServerCart(nextCart);
+        setCartStatus("ready");
+
+        if (issues.length > 0) {
+          setNotice(issues[0]);
+        }
+      } catch (error) {
+        if (!active || error?.name === "AbortError") return;
+
+        setCartStatus("error");
+        setCartError(
+          error?.message ||
+            "Your bag could not be loaded. Check your connection and try again.",
+        );
+      }
+    };
+
+    syncCart();
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [authStatus, session, cartAttempt]);
+  useEffect(() => {
+    if (!session) {
+      setServerOrders({ status: "idle", items: [], error: "" });
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    let active = true;
+
+    setServerOrders({ status: "loading", items: [], error: "" });
+
+    fetchOrders({ signal: controller.signal })
+      .then((items) => {
+        if (!active) return;
+        setServerOrders({ status: "ready", items, error: "" });
+      })
+      .catch((error) => {
+        if (!active || error?.name === "AbortError") return;
+
+        setServerOrders({
+          status: "error",
+          items: [],
+          error:
+            error?.message ||
+            "Your order history could not be loaded. Please try again.",
+        });
+      });
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [session, serverOrdersAttempt]);
   useEffect(() => {
     const controller = new AbortController();
 
@@ -274,6 +413,40 @@ function App() {
     return () => clearTimeout(timer);
   }, [notice]);
 
+  function applyServerCart(nextCart) {
+    const items = (nextCart.items || []).map((item) => ({
+      id: item.id || item.productId,
+      qty: item.qty ?? item.quantity ?? 1,
+      name: item.name || "",
+      price: item.price ?? 0,
+      image: item.image || "",
+      stock: item.stock ?? 0,
+      slug: item.slug || "",
+      material: item.material || "",
+      sku: item.sku || "",
+    }));
+
+    setCartSource("server");
+    setCart(items);
+    setCartSummary({
+      subtotal: nextCart.subtotal ?? 0,
+      discount: nextCart.discount ?? 0,
+      shipping: nextCart.shipping ?? 0,
+      total: nextCart.total ?? 0,
+      itemCount:
+        nextCart.itemCount ??
+        items.reduce((sum, item) => sum + item.qty, 0),
+    });
+  }
+  const reloadCart = () => {
+    setCartStatus("loading");
+    setCartError("");
+    setCartAttempt((current) => current + 1);
+  };
+  const retryOrders = () => {
+    setServerOrders({ status: "loading", items: [], error: "" });
+    setServerOrdersAttempt((current) => current + 1);
+  };
   const go = (next) => {
     const target = next.startsWith("/") ? next : "/";
     setRoute(target);
@@ -299,18 +472,42 @@ function App() {
     });
     setProductAttempt((current) => current + 1);
   };
-  const add = (id, qty = 1) => {
+  const add = async (id, qty = 1) => {
     const product = shopProducts.find((item) => item.id === id);
     if (!product || product.stock <= 0) {
       setNotice("This piece is currently out of stock");
       return;
     }
-    const existing = cart.find((item) => item.id === id)?.qty || 0;
-    if (existing >= product.stock) {
-      setNotice(`Only ${product.stock} available in this demo`);
+
+    if (session) {
+      if (cartPending) return;
+      setCartPending(true);
+
+      try {
+        const nextCart = await addCartItem({
+          productId: id,
+          quantity: qty,
+        });
+        applyServerCart(nextCart);
+        setCartStatus("ready");
+        setNotice(`${product.name} added to your bag`);
+      } catch (error) {
+        setNotice(error?.message || "Unable to add this item to your bag.");
+      } finally {
+        setCartPending(false);
+      }
+
       return;
     }
+
+    const existing = cart.find((item) => item.id === id)?.qty || 0;
+    if (existing >= product.stock) {
+      setNotice(`Only ${product.stock} available`);
+      return;
+    }
+
     const nextQty = Math.min(product.stock, existing + qty);
+    setCartSource("guest");
     setCart((items) => {
       const row = items.find((item) => item.id === id);
       return row
@@ -321,7 +518,24 @@ function App() {
     });
     setNotice(`${product.name} added to your bag`);
   };
-  const remove = (id) => {
+  const remove = async (id) => {
+    if (session) {
+      if (cartPending) return;
+      setCartPending(true);
+
+      try {
+        applyServerCart(await removeCartItem(id));
+        setNotice("Removed from your bag");
+      } catch (error) {
+        setNotice(error?.message || "Unable to remove this item.");
+      } finally {
+        setCartPending(false);
+      }
+
+      return;
+    }
+
+    setCartSource("guest");
     setCart((items) => items.filter((item) => item.id !== id));
     setNotice("Removed from your bag");
   };
@@ -335,28 +549,67 @@ function App() {
         : "Saved to your wishlist",
     );
   };
-  const quantity = (id, delta) => {
-    const max = shopProducts.find((item) => item.id === id)?.stock || 1;
+  const quantity = async (id, delta) => {
+    const row = cart.find((item) => item.id === id);
+    if (!row) return;
+
+    const product = shopProducts.find((item) => item.id === id);
+    const max = Math.max(1, Number(row.stock ?? product?.stock ?? 1) || 1);
+    const nextQty = Math.max(1, Math.min(max, row.qty + delta));
+
+    if (nextQty === row.qty) return;
+
+    if (session) {
+      if (cartPending) return;
+      setCartPending(true);
+
+      try {
+        applyServerCart(await updateCartItem(id, nextQty));
+      } catch (error) {
+        setNotice(error?.message || "Unable to update that quantity.");
+      } finally {
+        setCartPending(false);
+      }
+
+      return;
+    }
+
+    setCartSource("guest");
     setCart((items) =>
       items.map((item) =>
-        item.id === id
-          ? { ...item, qty: Math.max(1, Math.min(max, item.qty + delta)) }
-          : item,
+        item.id === id ? { ...item, qty: nextQty } : item,
       ),
     );
   };
   const count = cart.reduce((total, item) => total + item.qty, 0);
-  const subtotal = cart.reduce(
+  const guestSubtotal = cart.reduce(
     (total, item) =>
       total +
-      (shopProducts.find((product) => product.id === item.id)?.price || 0) *
+      (item.price ??
+        shopProducts.find((product) => product.id === item.id)?.price ??
+        0) *
         item.qty,
     0,
   );
+  const guestShipping =
+    guestSubtotal > 0 && guestSubtotal < 2500 ? 150 : 0;
+  const summary =
+    session && cartSource === "server"
+      ? cartSummary
+      : {
+          subtotal: guestSubtotal,
+          discount: 0,
+          shipping: guestShipping,
+          total: guestSubtotal + guestShipping,
+          itemCount: count,
+        };
+  const effectiveCartStatus =
+    session && cartStatus === "ready" && cartSource !== "server"
+      ? "loading"
+      : cartStatus;
   const currentOrderId = routePath.startsWith("/orders/")
     ? decodeSegment(routePath.split("/")[2] || "")
     : "";
-  const currentOrder = orderList.find((order) => order.id === currentOrderId);
   const isAdmin = routePath.startsWith("/admin") && session?.role === "admin";
   const filtered = useMemo(
     () =>
@@ -386,6 +639,13 @@ function App() {
   const signOut = async () => {
     try {
       await logout();
+      mergedSessionRef.current = "";
+      setCartSource("guest");
+      setCart(read("nivora-cart", []));
+      setCartStatus("ready");
+      setCartError("");
+      setCartSummary(EMPTY_SUMMARY);
+      setServerOrders({ status: "idle", items: [], error: "" });
       setNotice("Signed out");
       go("/");
     } catch (error) {
@@ -398,44 +658,9 @@ function App() {
       [productId]: [review, ...(items[productId] || [])],
     }));
   };
-  const placeOrder = (details) => {
-    const items = cart
-      .map((row) => {
-        const product = shopProducts.find((item) => item.id === row.id);
-        return product
-          ? {
-              id: product.id,
-              name: product.name,
-              price: product.price,
-              qty: row.qty,
-              image: product.image,
-            }
-          : null;
-      })
-      .filter(Boolean);
-    const orderSubtotal = items.reduce(
-      (total, item) => total + item.price * item.qty,
-      0,
-    );
-    const discount = couponDiscount(coupon, orderSubtotal, couponList);
-    const shipping = orderSubtotal >= 2500 ? 0 : 150;
-    const total = Math.max(0, orderSubtotal - discount + shipping);
-    const order = {
-      id: `NV-${Date.now().toString().slice(-6)}`,
-      customer: `${details.firstName} ${details.lastName}`.trim(),
-      email: details.email,
-      phone: details.phone,
-      date: formatDate(),
-      createdAt: new Date().toISOString(),
-      total,
-      subtotal: orderSubtotal,
-      discount,
-      shipping,
-      status: "Pending",
-      payment: "Cash on delivery",
-      paymentStatus: "Pending",
-      items,
-      address: {
+  const placeOrder = async (details, couponCode) => {
+    const order = await createOrder({
+      shippingAddress: {
         firstName: details.firstName,
         lastName: details.lastName,
         address: details.address,
@@ -444,11 +669,25 @@ function App() {
         postalCode: details.postalCode,
         country: details.country,
       },
-    };
-    setOrderList((items) => [order, ...items]);
+      phone: details.phone,
+      notes: details.notes || "",
+      couponCode: couponCode || "",
+      paymentMethod: "Cash on delivery",
+    });
+
+    setCartSource("server");
     setCart([]);
+    setCartSummary(EMPTY_SUMMARY);
     setCoupon("");
-    setNotice(`Order ${order.id} saved in this browser`);
+    setServerOrders((current) => ({
+      status: "ready",
+      items: [
+        order,
+        ...current.items.filter((item) => item.id !== order.id),
+      ],
+      error: "",
+    }));
+    setNotice(`Order ${order.id} placed`);
     return order;
   };
   const saveProduct = (product) => {
@@ -460,7 +699,9 @@ function App() {
   };
   const deleteProduct = (id) => {
     setProductList((items) => items.filter((item) => item.id !== id));
-    setCart((items) => items.filter((item) => item.id !== id));
+    if (!session) {
+      setCart((items) => items.filter((item) => item.id !== id));
+    }
     setWish((items) => items.filter((item) => item !== id));
     setReviews((items) => {
       const next = { ...items };
@@ -635,11 +876,16 @@ function App() {
         {routePath === "/cart" && (
           <Cart
             products={shopProducts}
+            session={session}
             cart={cart}
             quantity={quantity}
             remove={remove}
-            subtotal={subtotal}
+            summary={summary}
             go={go}
+            status={effectiveCartStatus}
+            error={cartError}
+            onRetry={reloadCart}
+            busy={cartPending}
           />
         )}
         {routePath === "/wishlist" && (
@@ -650,19 +896,30 @@ function App() {
             add={add}
           />
         )}
-        {routePath === "/checkout" && (
-          <Checkout
-            products={shopProducts}
-            coupons={couponList}
-            session={session}
-            cart={cart}
-            subtotal={subtotal}
-            coupon={coupon}
-            setCoupon={setCoupon}
-            setNotice={setNotice}
-            onPlaceOrder={placeOrder}
-          />
-        )}
+        {routePath === "/checkout" &&
+          (session ? (
+            <Checkout
+              products={shopProducts}
+              session={session}
+              cart={cart}
+              summary={summary}
+              coupon={coupon}
+              setCoupon={setCoupon}
+              setNotice={setNotice}
+              onPlaceOrder={placeOrder}
+              onReloadCart={reloadCart}
+              cartStatus={effectiveCartStatus}
+              cartError={cartError}
+            />
+          ) : (
+            <AuthGate
+              status={authStatus}
+              user={session}
+              title="Sign in to check out"
+              copy="Your guest bag is saved in this browser. Sign in and it will be merged with your account bag, without exceeding available stock."
+              next="/checkout"
+            />
+          ))}
         {routePath === "/login" && (
           <Auth mode="login" nextPath={nextPath} setNotice={setNotice} />
         )}
@@ -676,7 +933,9 @@ function App() {
           (session ? (
             <Account
               session={session}
-              orders={orderList}
+              orders={serverOrders.items}
+              ordersStatus={serverOrders.status}
+              ordersError={serverOrders.error}
               wish={wish}
               onLogout={signOut}
             />
@@ -691,19 +950,24 @@ function App() {
           ))}
         {routePath === "/orders" &&
           (session ? (
-            <OrdersPage orders={orderList} />
+            <OrdersPage
+              orders={serverOrders.items}
+              status={serverOrders.status}
+              error={serverOrders.error}
+              onRetry={retryOrders}
+            />
           ) : (
             <AuthGate
               status={authStatus}
               user={session}
               title="Order history is protected"
-              copy="Sign in to view the order history saved in this browser."
+              copy="Sign in to view orders placed with your Nivora account."
               next="/orders"
             />
           ))}
         {routePath.startsWith("/orders/") &&
           (session ? (
-            <OrderDetail order={currentOrder} />
+            <OrderDetail orderId={currentOrderId} />
           ) : (
             <AuthGate
               status={authStatus}
@@ -1404,7 +1668,22 @@ function ProductDetail({
     </div>
   );
 }
-function Cart({ products, cart, quantity, remove, subtotal, go }) {
+function Cart({
+  products,
+  session,
+  cart,
+  quantity,
+  remove,
+  summary,
+  go,
+  status,
+  error,
+  onRetry,
+  busy,
+}) {
+  const headingCount =
+    summary.itemCount || cart.reduce((total, item) => total + item.qty, 0);
+
   return (
     <div className="page-container">
       <div className="breadcrumbs">Home / Your bag</div>
@@ -1413,17 +1692,27 @@ function Cart({ products, cart, quantity, remove, subtotal, go }) {
           <p className="eyebrow">A good choice</p>
           <h1>
             Your bag
-            <span className="heading-count">
-              {" "}
-              ({cart.reduce((a, b) => a + b.qty, 0)})
-            </span>
+            <span className="heading-count"> ({headingCount})</span>
           </h1>
         </div>
         <a href="#/products" className="text-link">
           Continue shopping ↗
         </a>
       </div>
-      {!cart.length ? (
+      {session && status === "error" ? (
+        <div className="empty-state" role="alert">
+          <h2>Your bag could not be loaded.</h2>
+          <p>{error || "Check your connection and try again."}</p>
+          <button type="button" className="button primary" onClick={onRetry}>
+            Try again
+          </button>
+        </div>
+      ) : session && status === "loading" ? (
+        <div className="empty-state" aria-live="polite">
+          <h2>Loading your bag…</h2>
+          <p>Fetching the items saved to your Nivora account.</p>
+        </div>
+      ) : !cart.length ? (
         <div className="empty-state">
           <h2>Your bag is taking a breather.</h2>
           <p>Find a piece that feels like you.</p>
@@ -1435,48 +1724,62 @@ function Cart({ products, cart, quantity, remove, subtotal, go }) {
         <div className="cart-layout">
           <div className="cart-list">
             {cart.map((row) => {
-              const p = products.find((x) => x.id === row.id);
-              if (!p) return null;
+              const product = products.find((item) => item.id === row.id);
+              const item = row.name ? row : product;
+              if (!item) return null;
+
+              const price = Number(item.price ?? row.price ?? 0);
+              const stock = Number(item.stock ?? row.stock ?? 0);
+              const soldOut = stock <= 0;
+              const atLimit = !soldOut && row.qty >= stock;
+              const productLink = item.slug
+                ? `#/product/${item.slug}`
+                : "#/products";
+
               return (
                 <div className="cart-item" key={row.id}>
                   <img
-                    src={p.image || FALLBACK_IMAGE}
-                    alt={p.name}
+                    src={item.image || FALLBACK_IMAGE}
+                    alt={item.name}
                     onError={(event) => {
                       event.currentTarget.src = FALLBACK_IMAGE;
                     }}
                   />
                   <div className="cart-item-info">
-                    <a href={`#/product/${p.slug}`}>{p.name}</a>
-                    <small>{p.material}</small>
+                    <a href={productLink}>{item.name}</a>
+                    <small>{item.material || "Nivora collection"}</small>
                     <div className="qty-control">
                       <button
                         type="button"
-                        aria-label={`Decrease ${p.name} quantity`}
+                        aria-label={`Decrease ${item.name} quantity`}
                         onClick={() => quantity(row.id, -1)}
+                        disabled={busy || row.qty <= 1}
                       >
                         −
                       </button>
                       <span>{row.qty}</span>
                       <button
                         type="button"
-                        aria-label={`Increase ${p.name} quantity`}
+                        aria-label={`Increase ${item.name} quantity`}
                         onClick={() => quantity(row.id, 1)}
-                        disabled={row.qty >= p.stock}
+                        disabled={busy || soldOut || atLimit}
                       >
                         +
                       </button>
                     </div>
-                    {row.qty >= p.stock && (
-                      <small>Only {p.stock} available in this demo</small>
+                    {soldOut ? (
+                      <small>Out of stock</small>
+                    ) : (
+                      atLimit && <small>Only {stock} available</small>
                     )}
                   </div>
                   <div className="cart-price">
-                    {currency(row.qty * p.price)}
+                    {currency(row.qty * price)}
                     <button
                       type="button"
                       onClick={() => remove(row.id)}
-                      aria-label={`Remove ${p.name} from bag`}
+                      aria-label={`Remove ${item.name} from bag`}
+                      disabled={busy}
                     >
                       Remove
                     </button>
@@ -1489,29 +1792,37 @@ function Cart({ products, cart, quantity, remove, subtotal, go }) {
             <h2>Order summary</h2>
             <p>
               <span>Subtotal</span>
-              <b>{currency(subtotal)}</b>
+              <b>{currency(summary.subtotal)}</b>
             </p>
             <p>
               <span>Shipping</span>
-              <b>{subtotal >= 2500 ? "Complimentary" : "₹150"}</b>
+              <b>
+                {summary.shipping
+                  ? currency(summary.shipping)
+                  : "Complimentary"}
+              </b>
             </p>
             <p>
               <span>Discount</span>
-              <b>—</b>
+              <b>
+                {summary.discount > 0
+                  ? `−${currency(summary.discount)}`
+                  : "—"}
+              </b>
             </p>
             <div className="summary-total">
               <span>Total</span>
-              <b>
-                {currency(subtotal + (subtotal >= 2500 || !subtotal ? 0 : 150))}
-              </b>
+              <b>{currency(summary.total)}</b>
             </div>
             <small>
-              Taxes included where applicable. Final shipping details shown at
-              checkout.
+              {session
+                ? "Stock and totals are checked again by the server at checkout."
+                : "Sign in at checkout to sync this bag with your account."}
             </small>
             <button
               className="button primary full"
               onClick={() => go("/checkout")}
+              disabled={busy}
             >
               Continue to checkout ↗
             </button>
@@ -1556,14 +1867,16 @@ function Wishlist({ products, wish, toggleWish, add }) {
 }
 function Checkout({
   products,
-  coupons,
   session,
   cart,
-  subtotal,
+  summary,
   coupon,
   setCoupon,
   setNotice,
   onPlaceOrder,
+  onReloadCart,
+  cartStatus,
+  cartError,
 }) {
   const [form, setForm] = useState(() => ({
     email: session?.email || "",
@@ -1579,10 +1892,37 @@ function Checkout({
   const [errors, setErrors] = useState({});
   const [code, setCode] = useState(coupon || "");
   const [couponMessage, setCouponMessage] = useState(null);
+  const [quote, setQuote] = useState(null);
+  const [couponBusy, setCouponBusy] = useState(false);
   const [formError, setFormError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
   const [placedOrder, setPlacedOrder] = useState(null);
 
+  useEffect(() => {
+    setQuote(null);
+    setCouponMessage(null);
+  }, [summary.subtotal]);
+
   if (placedOrder) return <OrderConfirmation order={placedOrder} />;
+  if (cartStatus === "loading") {
+    return (
+      <div className="page-container empty-state" aria-live="polite">
+        <h1>Loading your bag…</h1>
+        <p>Checking the items saved to your Nivora account.</p>
+      </div>
+    );
+  }
+  if (cartStatus === "error") {
+    return (
+      <div className="page-container empty-state" role="alert">
+        <h1>Your bag could not be loaded.</h1>
+        <p>{cartError || "Check your connection and try again."}</p>
+        <button type="button" className="button primary" onClick={onReloadCart}>
+          Try again
+        </button>
+      </div>
+    );
+  }
   if (!cart.length) {
     return (
       <div className="page-container empty-state">
@@ -1595,51 +1935,52 @@ function Checkout({
     );
   }
 
-  const discount = couponDiscount(coupon, subtotal, coupons);
-  const shipping = subtotal >= 2500 ? 0 : 150;
-  const total = Math.max(0, subtotal - discount + shipping);
+  const discount = quote?.discount ?? summary.discount ?? 0;
+  const shipping = quote?.shipping ?? summary.shipping ?? 0;
+  const total = quote?.total ?? summary.total ?? 0;
 
   const updateField = (field, value) => {
     setForm((current) => ({ ...current, [field]: value }));
     setErrors((current) => ({ ...current, [field]: "" }));
     setFormError("");
   };
-  const applyCoupon = () => {
+  const applyCoupon = async () => {
     const normalized = code.trim().toUpperCase();
-    const found = coupons.find(
-      (item) =>
-        item.code.toUpperCase() === normalized && item.status === "Active",
-    );
-    if (!found) {
+
+    if (!normalized) {
+      setQuote(null);
       setCoupon("");
       setCouponMessage({
         tone: "error",
-        text: "That code is not available in this demo.",
+        text: "Enter a coupon code to apply.",
       });
       return;
     }
-    if (subtotal < Number(found.minimum || 0)) {
+
+    if (couponBusy) return;
+    setCouponBusy(true);
+
+    try {
+      const quoted = await quoteCart(normalized);
+      setQuote(quoted);
+      setCoupon(quoted.couponCode || normalized);
+      setCouponMessage({
+        tone: "success",
+        text: `${quoted.couponCode || normalized} applied: ${currency(
+          quoted.discount,
+        )} off.`,
+      });
+      setNotice("Coupon applied");
+    } catch (error) {
+      setQuote(null);
       setCoupon("");
       setCouponMessage({
         tone: "error",
-        text: `This code needs a minimum order of ${currency(found.minimum)}.`,
+        text: error?.message || "That coupon could not be applied.",
       });
-      return;
+    } finally {
+      setCouponBusy(false);
     }
-    if (found.expiry && new Date(found.expiry) < new Date()) {
-      setCoupon("");
-      setCouponMessage({
-        tone: "error",
-        text: "That code has expired in this demo.",
-      });
-      return;
-    }
-    setCoupon(normalized);
-    setCouponMessage({
-      tone: "success",
-      text: `Demo code applied: ${found.value} off.`,
-    });
-    setNotice("Demo coupon applied");
   };
   const validate = () => {
     const nextErrors = {};
@@ -1662,8 +2003,11 @@ function Checkout({
     if (!form.country.trim()) nextErrors.country = "Country is required.";
     return nextErrors;
   };
-  const handleSubmit = (event) => {
+  const handleSubmit = async (event) => {
     event.preventDefault();
+
+    if (submitting) return;
+
     const nextErrors = validate();
     if (Object.keys(nextErrors).length) {
       setErrors(nextErrors);
@@ -1672,22 +2016,25 @@ function Checkout({
       document.getElementById(`checkout-${firstField}`)?.focus();
       return;
     }
-    const stockIssue = cart.find((row) => {
-      const product = products.find((item) => item.id === row.id);
-      return !product || row.qty > product.stock;
-    });
-    if (stockIssue) {
-      const product = products.find((item) => item.id === stockIssue.id);
+
+    setSubmitting(true);
+    setFormError("");
+
+    try {
+      const order = await onPlaceOrder({ ...form, notes: "" }, coupon);
+      setPlacedOrder(order);
+    } catch (error) {
       setFormError(
-        product
-          ? `${product.name} has only ${product.stock} available in this demo.`
-          : "One item in your bag is no longer available.",
+        error?.message ||
+          "Your order could not be placed. Please try again.",
       );
-      return;
+
+      if (error?.status === 409) {
+        onReloadCart();
+      }
+    } finally {
+      setSubmitting(false);
     }
-    const order = onPlaceOrder(form);
-    setPlacedOrder(order);
-    setNotice(`Order ${order.id} placed locally`);
   };
 
   return (
@@ -1701,8 +2048,9 @@ function Checkout({
       </div>
 
       <DemoNotice>
-        Local demo checkout. Placing an order saves it in this browser, updates
-        the demo order history and clears the bag. No payment is processed.
+        Checkout is processed by the Nivora server. Prices, stock, discounts
+        and shipping are recalculated when you place the order. Cash on delivery
+        only; no online payment is processed.
       </DemoNotice>
       <div aria-live="polite">
         {formError && <DemoNotice tone="error">{formError}</DemoNotice>}
@@ -1719,10 +2067,16 @@ function Checkout({
                 type="email"
                 autoComplete="email"
                 value={form.email}
+                readOnly={Boolean(session)}
                 onChange={(event) => updateField("email", event.target.value)}
                 aria-invalid={Boolean(errors.email)}
                 aria-describedby={errors.email ? "checkout-email-error" : undefined}
               />
+              {session && (
+                <span className="text-[9px] text-[var(--muted)]">
+                  Order updates are sent to your account email.
+                </span>
+              )}
               {errors.email && (
                 <span
                   id="checkout-email-error"
@@ -1876,13 +2230,13 @@ function Checkout({
             <h2>Payment preference</h2>
             <label className="radio-row">
               <input type="radio" name="payment" defaultChecked />
-              Pay on delivery
-              <small>Demo order · no payment is processed</small>
+              Cash on delivery
+              <small>Pay when your order arrives</small>
             </label>
             <label className="radio-row">
               <input type="radio" name="payment" disabled />
               Online payment
-              <small>Not available until payment integration is added</small>
+              <small>Not available in this phase</small>
             </label>
           </section>
         </div>
@@ -1891,12 +2245,14 @@ function Checkout({
           <h2>Your order</h2>
           {cart.map((row) => {
             const product = products.find((item) => item.id === row.id);
+            const name = row.name || product?.name || "Nivora piece";
+            const price = Number(row.price ?? product?.price ?? 0);
             return (
               <p key={row.id}>
                 <span>
-                  {product?.name} × {row.qty}
+                  {name} × {row.qty}
                 </span>
-                <b>{currency((product?.price || 0) * row.qty)}</b>
+                <b>{currency(price * row.qty)}</b>
               </p>
             );
           })}
@@ -1911,8 +2267,9 @@ function Checkout({
               type="button"
               className="button outline"
               onClick={applyCoupon}
+              disabled={couponBusy}
             >
-              Apply
+              {couponBusy ? "Checking…" : "Apply"}
             </button>
           </div>
           <div aria-live="polite">
@@ -1924,7 +2281,7 @@ function Checkout({
           </div>
           <p>
             <span>Subtotal</span>
-            <b>{currency(subtotal)}</b>
+            <b>{currency(summary.subtotal)}</b>
           </p>
           <p>
             <span>Shipping</span>
@@ -1938,11 +2295,19 @@ function Checkout({
             <span>Total</span>
             <b>{currency(total)}</b>
           </div>
-          <button type="submit" className="button primary full">
-            Place demo order
+          {quote && quote.couponCode !== coupon && (
+            <small>Apply the code again after changing your bag.</small>
+          )}
+          <button
+            type="submit"
+            className="button primary full"
+            disabled={submitting || couponBusy}
+          >
+            {submitting ? "Placing order…" : "Place order"}
           </button>
           <small>
-            No payment is processed. The order is stored in this browser only.
+            Cash on delivery only. Stock, discounts and totals are confirmed by
+            the server when the order is placed.
           </small>
         </aside>
       </form>
@@ -2171,7 +2536,14 @@ function Auth({ mode, nextPath, setNotice }) {
     </div>
   );
 }
-function Account({ session, orders, wish, onLogout }) {
+function Account({
+  session,
+  orders,
+  ordersStatus,
+  ordersError,
+  wish,
+  onLogout,
+}) {
   const latestAddress = orders.find((order) => order.address)?.address;
   const latestOrder = orders[0];
 
@@ -2217,8 +2589,8 @@ function Account({ session, orders, wish, onLogout }) {
             </p>
           ) : (
             <p>
-              No address saved yet. The address from your first demo checkout
-              will appear here.
+              No address saved yet. The address from your most recent order will
+              appear here.
             </p>
           )}
         </section>
@@ -2226,9 +2598,17 @@ function Account({ session, orders, wish, onLogout }) {
         <section className="account-panel">
           <h2>Your orders</h2>
           <p>
-            {orders.length} demo {orders.length === 1 ? "order" : "orders"} in
-            this browser.
+            {ordersStatus === "loading" || ordersStatus === "idle"
+              ? "Loading your orders…"
+              : ordersStatus === "error"
+                ? "Your order history could not be loaded right now."
+                : `${orders.length} ${
+                    orders.length === 1 ? "order" : "orders"
+                  } on your account.`}
           </p>
+          {ordersStatus === "error" && ordersError && (
+            <p className="muted">{ordersError}</p>
+          )}
           {latestOrder && (
             <p>
               Latest: <b>{latestOrder.id}</b> · {latestOrder.status}
@@ -2259,33 +2639,43 @@ function Account({ session, orders, wish, onLogout }) {
       </div>
 
       <DemoNotice className="mt-6">
-        Signing out clears the server-issued session cookie. Order history and
-        wishlists in this build remain browser demo data.
+        Signing out clears the server-issued session cookie. Saved pieces remain
+        in this browser until you clear them.
       </DemoNotice>
     </div>
   );
 }
-function OrdersPage({ orders }) {
+function OrdersPage({ orders, status, error, onRetry }) {
   return (
     <div className="page-container">
       <div className="breadcrumbs">Home / Order history</div>
       <p className="eyebrow">Your Nivora</p>
       <h1>Order history</h1>
       <p className="muted">
-        Sample orders plus orders placed in this browser. These are local demo
-        records and are not tied to your server account.
+        Orders placed with your Nivora account. Cash on delivery orders are
+        confirmed by the server.
       </p>
-      <DemoNotice>
-        These orders are frontend demo records. The admin workspace can update
-        their status, but no server or payment provider is connected.
-      </DemoNotice>
-      {orders.length ? (
+
+      {status === "loading" || status === "idle" ? (
+        <div className="empty-state" aria-live="polite">
+          <h2>Loading your orders…</h2>
+          <p>Fetching your order history from your account.</p>
+        </div>
+      ) : status === "error" ? (
+        <div className="empty-state" role="alert">
+          <h2>Your orders could not be loaded.</h2>
+          <p>{error || "Check your connection and try again."}</p>
+          <button type="button" className="button primary" onClick={onRetry}>
+            Try again
+          </button>
+        </div>
+      ) : orders.length ? (
         orders.map((order) => (
           <div className="order-row" key={order.id}>
             <div>
               <b>{order.id}</b>
               <small>
-                Placed {order.date} ·{" "}
+                Placed {formatDate(order.createdAt)} ·{" "}
                 {(order.items || []).map((item) => item.name).join(", ")}
               </small>
             </div>
@@ -2299,7 +2689,7 @@ function OrdersPage({ orders }) {
       ) : (
         <div className="empty-state">
           <h2>No orders yet.</h2>
-          <p>Your first demo order will appear here after checkout.</p>
+          <p>Your first order will appear here after checkout.</p>
           <a className="button primary" href="#/products">
             Explore the collection
           </a>
@@ -2309,13 +2699,80 @@ function OrdersPage({ orders }) {
   );
 }
 
-function OrderDetail({ order }) {
-  if (!order) {
+function OrderDetail({ orderId }) {
+  const [attempt, setAttempt] = useState(0);
+  const [state, setState] = useState({
+    status: "loading",
+    order: null,
+    error: "",
+    notFound: false,
+  });
+
+  useEffect(() => {
+    if (!orderId) {
+      setState({
+        status: "not-found",
+        order: null,
+        error: "",
+        notFound: true,
+      });
+      return undefined;
+    }
+
+    const controller = new AbortController();
+    let active = true;
+
+    setState({
+      status: "loading",
+      order: null,
+      error: "",
+      notFound: false,
+    });
+
+    fetchOrderById(orderId, { signal: controller.signal })
+      .then((order) => {
+        if (!active) return;
+        setState({
+          status: "ready",
+          order,
+          error: "",
+          notFound: false,
+        });
+      })
+      .catch((error) => {
+        if (!active || error?.name === "AbortError") return;
+
+        setState({
+          status: error?.status === 404 ? "not-found" : "error",
+          order: null,
+          error:
+            error?.message ||
+            "This order could not be loaded. Please try again.",
+          notFound: error?.status === 404,
+        });
+      });
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [orderId, attempt]);
+
+  if (state.status === "loading") {
+    return (
+      <div className="page-container empty-state" aria-live="polite">
+        <p className="eyebrow">Your order</p>
+        <h1>Loading order details…</h1>
+      </div>
+    );
+  }
+
+  if (state.status === "not-found") {
     return (
       <div className="page-container empty-state">
         <p className="eyebrow">Order not found</p>
         <h1>We can't find that order.</h1>
-        <p>It may have been removed from this browser's demo data.</p>
+        <p>It may not exist, or it may belong to a different account.</p>
         <a className="button primary" href="#/orders">
           Back to order history
         </a>
@@ -2323,11 +2780,31 @@ function OrderDetail({ order }) {
     );
   }
 
+  if (state.status === "error") {
+    return (
+      <div className="page-container empty-state" role="alert">
+        <p className="eyebrow">Your order</p>
+        <h1>This order could not be loaded.</h1>
+        <p>{state.error}</p>
+        <button
+          type="button"
+          className="button primary"
+          onClick={() => setAttempt((current) => current + 1)}
+        >
+          Try again
+        </button>
+      </div>
+    );
+  }
+
+  const order = state.order;
   const statusOrder = ["Pending", "Preparing", "Shipped", "Delivered"];
   const steps = ["Order received", "Preparing", "On its way", "Delivered"];
   const currentStep =
-    order.status === "Cancelled" ? -1 : Math.max(0, statusOrder.indexOf(order.status));
-  const address = order.address;
+    order.status === "Cancelled"
+      ? -1
+      : Math.max(0, statusOrder.indexOf(order.status));
+  const address = order.address || order.shippingAddress;
   const subtotal =
     order.subtotal ??
     (order.items || []).reduce(
@@ -2340,15 +2817,16 @@ function OrderDetail({ order }) {
       <div className="breadcrumbs">
         Home / <a href="#/orders">Order history</a> / {order.id}
       </div>
-      <p className="eyebrow">Demo order</p>
+      <p className="eyebrow">Your order</p>
       <h1>Order {order.id}</h1>
       <p className="muted">
-        Placed {order.date} · {order.customer || "Demo customer"}
+        Placed {formatDate(order.createdAt)} ·{" "}
+        {order.customer || order.email || "Nivora customer"}
       </p>
 
       {order.status === "Cancelled" ? (
         <DemoNotice tone="error">
-          This demo order is marked as cancelled.
+          This order is marked as cancelled.
         </DemoNotice>
       ) : (
         <div className="order-progress">
@@ -2386,6 +2864,12 @@ function OrderDetail({ order }) {
                 <b>−{currency(order.discount)}</b>
               </p>
             )}
+            {order.couponCode && (
+              <p className="flex justify-between gap-4">
+                <span>Coupon</span>
+                <b>{order.couponCode}</b>
+              </p>
+            )}
           </div>
         </section>
 
@@ -2402,7 +2886,7 @@ function OrderDetail({ order }) {
               {address.country}
             </p>
           ) : (
-            <p>Address not recorded for this sample order.</p>
+            <p>Address not recorded for this order.</p>
           )}
           <h2>Payment status</h2>
           <p>
@@ -2416,10 +2900,9 @@ function OrderDetail({ order }) {
       <p className="summary-total">
         Total <b>{currency(order.total)}</b>
       </p>
-      <DemoNotice>
-        This detail view is powered by the order ID in the URL and local demo
-        data. A backend will replace this storage later.
-      </DemoNotice>
+      <p className="muted">
+        This order detail was loaded from your Nivora account.
+      </p>
     </div>
   );
 }

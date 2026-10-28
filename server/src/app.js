@@ -5,8 +5,10 @@ import morgan from "morgan";
 import { env } from "./config/env.js";
 import { errorHandler, notFoundHandler } from "./middleware/errorHandler.js";
 import authRouter from "./routes/auth.js";
+import cartRouter from "./routes/cart.js";
 import catalogueRouter from "./routes/catalogue.js";
 import healthRouter from "./routes/health.js";
+import ordersRouter from "./routes/orders.js";
 
 const app = express();
 
@@ -29,6 +31,8 @@ app.use(express.json({ limit: "100kb" }));
 
 app.use("/api/health", healthRouter);
 app.use("/api/auth", authRouter);
+app.use("/api/cart", cartRouter);
+app.use("/api/orders", ordersRouter);
 app.use("/api", catalogueRouter);
 
 app.use(notFoundHandler);

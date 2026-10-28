@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import { env } from "./env.js";
+import { serviceUnavailable } from "../utils/httpError.js";
 
 const CONNECTION_STATES = {
   0: "disconnected",
@@ -44,5 +45,29 @@ export const connectDatabase = async () => {
 export const disconnectDatabase = async () => {
   if (mongoose.connection.readyState !== 0) {
     await mongoose.disconnect();
+  }
+};
+
+export const assertTransactionsSupported = async () => {
+  if (getDatabaseStatus() !== "connected") {
+    throw serviceUnavailable("Checkout is temporarily unavailable.");
+  }
+
+  let hello;
+
+  try {
+    hello = await mongoose.connection.db.admin().command({ hello: 1 });
+  } catch {
+    throw serviceUnavailable(
+      "Checkout requires a MongoDB deployment with transaction support.",
+    );
+  }
+
+  const supported = Boolean(hello.setName) || hello.msg === "isdbgrid";
+
+  if (!supported) {
+    throw serviceUnavailable(
+      "Checkout requires MongoDB transactions. Run the API against a replica set or sharded cluster; standalone MongoDB cannot place orders safely.",
+    );
   }
 };

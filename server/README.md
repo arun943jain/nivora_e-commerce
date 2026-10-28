@@ -41,6 +41,43 @@ middleware read the role from MongoDB on every protected request.
 Seeded sample users are directory records only and have no password; they
 cannot sign in. Register a new account before using it.
 
+## Cart, checkout and customer orders
+
+All cart and order routes require the `httpOnly` session cookie.
+
+| Method | Path                          | Notes                                                        |
+| ------ | ----------------------------- | ------------------------------------------------------------ |
+| GET    | `/api/cart`                   | Returns the signed-in user's cart and server totals.          |
+| POST   | `/api/cart/items`             | Adds a product by its stable `productId`.                     |
+| PATCH  | `/api/cart/items/:productId`  | Replaces a line quantity.                                    |
+| DELETE | `/api/cart/items/:productId`  | Removes a line.                                              |
+| POST   | `/api/cart/merge`             | Merges guest lines after sign-in, capped at current stock.   |
+| POST   | `/api/cart/quote`             | Validates a coupon and returns recalculated totals.          |
+| DELETE | `/api/cart`                   | Clears the cart.                                             |
+| POST   | `/api/orders`                 | Places a cash-on-delivery order from the server cart.        |
+| GET    | `/api/orders`                 | Lists the signed-in user's orders, newest first.             |
+| GET    | `/api/orders/:id`             | Returns one order owned by the signed-in user.               |
+
+Cart writes validate the live product status, stock and quantity in MongoDB.
+Checkout ignores client-supplied prices, discounts, shipping and totals:
+the server rereads the cart and products, validates the coupon's status,
+expiry, minimum order and usage limit, and stores snapshots on the order.
+Guest carts remain in browser `localStorage` and are merged into the account
+cart on sign-in without exceeding stock.
+
+Only cash on delivery is supported. No payment provider is called and no
+online payment is implied.
+
+### Transaction requirement
+
+Placing an order decrements stock, increments coupon usage, creates the order
+and clears the cart in one MongoDB transaction. The deployment database must
+therefore be a replica set or a sharded cluster. The API checks this before
+checkout and returns `503` with a clear message for a standalone MongoDB; it
+never falls back to a non-transactional order path that could leave stock and
+orders out of sync. Local single-node MongoDB servers normally need to be
+started as a single-node replica set before checkout can be used.
+
 ## Manual administrator promotion
 
 There is no public admin-granting endpoint. To promote an existing registered

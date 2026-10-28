@@ -51,3 +51,58 @@ export const serializeUser = (user) => ({
   status: user.status,
   createdAt: user.createdAt,
 });
+
+const serializeAddress = (address) =>
+  address
+    ? {
+        firstName: address.firstName,
+        lastName: address.lastName,
+        address: address.address,
+        city: address.city,
+        state: address.state,
+        postalCode: address.postalCode,
+        country: address.country,
+      }
+    : null;
+
+export const serializeOrder = (order) => {
+  const shippingAddress = serializeAddress(order.shippingAddress);
+
+  return {
+    id: order.orderNumber,
+    orderNumber: order.orderNumber,
+    customer: order.customer?.name || "",
+    customerDetails: {
+      name: order.customer?.name || "",
+      email: order.customer?.email || "",
+      phone: order.customer?.phone || "",
+    },
+    email: order.customer?.email || "",
+    phone: order.customer?.phone || "",
+    items: (order.items || []).map((item) => ({
+      id: item.productId || String(item.product || ""),
+      productId: item.productId || "",
+      sku: item.sku || "",
+      name: item.name,
+      image: item.image || "",
+      price: item.price,
+      qty: item.quantity,
+      quantity: item.quantity,
+      lineTotal: item.price * item.quantity,
+    })),
+    address: shippingAddress,
+    shippingAddress,
+    subtotal: order.subtotal,
+    discount: order.discount || 0,
+    shipping: order.shipping || 0,
+    total: order.total,
+    couponCode: order.couponCode || "",
+    payment: order.paymentMethod || "Cash on delivery",
+    paymentMethod: order.paymentMethod || "Cash on delivery",
+    paymentStatus: order.paymentStatus || "Pending",
+    status: order.status || "Pending",
+    notes: order.notes || "",
+    createdAt: order.createdAt,
+    updatedAt: order.updatedAt,
+  };
+};

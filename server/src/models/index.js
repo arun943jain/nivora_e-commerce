@@ -1,3 +1,4 @@
+export { default as Cart, MAX_CART_ITEMS, MAX_CART_QUANTITY } from "./Cart.js";
 export { default as Category } from "./Category.js";
 export { default as Coupon } from "./Coupon.js";
 export { default as Order } from "./Order.js";
