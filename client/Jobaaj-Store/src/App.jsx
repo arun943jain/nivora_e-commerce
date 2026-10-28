@@ -23,6 +23,11 @@ import {
   fetchOrders,
 } from "./api/orders.js";
 import {
+  createRazorpayCheckout,
+  retryRazorpayCheckout,
+  verifyRazorpayPayment,
+} from "./api/payments.js";
+import {
   fetchCategories,
   fetchProductBySlug,
   fetchProducts,
@@ -35,6 +40,7 @@ import DemoNotice from "./components/DemoNotice.jsx";
 import OrderConfirmation from "./components/OrderConfirmation.jsx";
 import useAdminWorkspace from "./hooks/useAdminWorkspace.js";
 import useCatalogueListing from "./hooks/useCatalogueListing.js";
+import useRazorpayCheckout from "./hooks/useRazorpayCheckout.js";
 import "./App.css";
 
 const IS_DEVELOPMENT = import.meta.env.DEV;
@@ -65,6 +71,16 @@ const formatDate = (value = new Date()) => {
     month: "short",
     year: "numeric",
   }).format(Number.isNaN(date.getTime()) ? new Date() : date);
+};
+const formatTime = (value) => {
+  const date = value instanceof Date ? value : new Date(value);
+
+  if (Number.isNaN(date.getTime())) return "";
+
+  return new Intl.DateTimeFormat("en-IN", {
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(date);
 };
 const decodeSegment = (value) => {
   try {
@@ -648,6 +664,16 @@ function App() {
       [productId]: [review, ...(items[productId] || [])],
     }));
   };
+  const upsertServerOrder = (order) => {
+    setServerOrders((current) => ({
+      status: "ready",
+      items: [
+        order,
+        ...(current.items || []).filter((item) => item.id !== order.id),
+      ],
+      error: "",
+    }));
+  };
   const placeOrder = async (details, couponCode) => {
     const order = await createOrder({
       shippingAddress: {
@@ -669,16 +695,43 @@ function App() {
     setCart([]);
     setCartSummary(EMPTY_SUMMARY);
     setCoupon("");
-    setServerOrders((current) => ({
-      status: "ready",
-      items: [
-        order,
-        ...current.items.filter((item) => item.id !== order.id),
-      ],
-      error: "",
-    }));
+    upsertServerOrder(order);
     setNotice(`Order ${order.id} placed`);
     return order;
+  };
+  // The server creates the internal order and Razorpay order from the stored
+  // cart. This function only returns the public checkout configuration.
+  const startRazorpayOrder = async (details, couponCode) => {
+    const session = await createRazorpayCheckout({
+      shippingAddress: {
+        firstName: details.firstName,
+        lastName: details.lastName,
+        address: details.address,
+        city: details.city,
+        state: details.state,
+        postalCode: details.postalCode,
+        country: details.country,
+      },
+      phone: details.phone,
+      notes: details.notes || "",
+      couponCode: couponCode || "",
+    });
+
+    upsertServerOrder(session.order);
+    return session;
+  };
+  // Called only after the server has verified the payment result.
+  const completeOnlineOrder = (order) => {
+    upsertServerOrder(order);
+    setCartSource("server");
+    setCoupon("");
+
+    if (order.paymentStatus === "Paid") {
+      setNotice(`Order ${order.id} paid`);
+      reloadCart();
+    } else {
+      setNotice(`Order ${order.id} saved`);
+    }
   };
 
   return (
@@ -859,6 +912,8 @@ function App() {
               setCoupon={setCoupon}
               setNotice={setNotice}
               onPlaceOrder={placeOrder}
+              onStartRazorpay={startRazorpayOrder}
+              onOrderComplete={completeOnlineOrder}
               onReloadCart={reloadCart}
               cartStatus={effectiveCartStatus}
               cartError={cartError}
@@ -1809,6 +1864,8 @@ function Checkout({
   setCoupon,
   setNotice,
   onPlaceOrder,
+  onStartRazorpay,
+  onOrderComplete,
   onReloadCart,
   cartStatus,
   cartError,
@@ -1832,6 +1889,12 @@ function Checkout({
   const [formError, setFormError] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [placedOrder, setPlacedOrder] = useState(null);
+  const [paymentMethod, setPaymentMethod] = useState("cod");
+  // idle | starting | awaiting | verifying | pending | failed | cancelled
+  const [paymentState, setPaymentState] = useState("idle");
+  const [paymentMessage, setPaymentMessage] = useState("");
+  const [onlineOrder, setOnlineOrder] = useState(null);
+  const { openCheckout } = useRazorpayCheckout();
 
   useEffect(() => {
     setQuote(null);
@@ -1873,6 +1936,26 @@ function Checkout({
   const discount = quote?.discount ?? summary.discount ?? 0;
   const shipping = quote?.shipping ?? summary.shipping ?? 0;
   const total = quote?.total ?? summary.total ?? 0;
+  const retryableOrder =
+    onlineOrder &&
+    onlineOrder.paymentRetryable &&
+    ["cancelled", "failed"].includes(paymentState)
+      ? onlineOrder
+      : null;
+  const paymentLocked = ["pending", "verifying"].includes(paymentState);
+  const submitLabel = submitting
+    ? paymentMethod === "razorpay"
+      ? paymentState === "verifying"
+        ? "Confirming payment…"
+        : paymentState === "awaiting"
+          ? "Complete payment in Razorpay…"
+          : "Opening Razorpay…"
+      : "Placing order…"
+    : paymentMethod === "razorpay"
+      ? retryableOrder
+        ? `Retry payment for ${retryableOrder.id}`
+        : "Place order and pay"
+      : "Place order";
 
   const updateField = (field, value) => {
     setForm((current) => ({ ...current, [field]: value }));
@@ -1938,10 +2021,101 @@ function Checkout({
     if (!form.country.trim()) nextErrors.country = "Country is required.";
     return nextErrors;
   };
+  const checkoutDetails = () => ({ ...form, notes: "" });
+
+  const runRazorpayPayment = async (session) => {
+    setOnlineOrder(session.order);
+    setPaymentState("awaiting");
+
+    const result = await openCheckout(session.payment);
+
+    if (result.status === "cancelled") {
+      setPaymentState("cancelled");
+      setPaymentMessage(
+        `Payment was cancelled. Order ${session.order.id} is saved as unpaid, and its items are held for a short time. You can retry the payment below.`,
+      );
+      return;
+    }
+
+    if (result.status === "failed") {
+      setPaymentState("failed");
+      setPaymentMessage(
+        result.error ||
+          `The payment was not completed. Order ${session.order.id} is saved as unpaid and can be retried.`,
+      );
+      return;
+    }
+
+    setPaymentState("verifying");
+    const outcome = await verifyRazorpayPayment(result.response);
+    setOnlineOrder(outcome.order);
+
+    if (outcome.verified) {
+      onOrderComplete(outcome.order);
+      setPlacedOrder(outcome.order);
+      return;
+    }
+
+    setPaymentState(
+      outcome.order.paymentStatus === "Failed" ? "failed" : "pending",
+    );
+    setPaymentMessage(
+      outcome.message ||
+        "The payment is still being confirmed. Do not pay again; check this order again in a moment.",
+    );
+  };
+
+  const startOnlinePayment = async ({ retry = false } = {}) => {
+    if (submitting) return;
+
+    if (!retry) {
+      const nextErrors = validate();
+
+      if (Object.keys(nextErrors).length) {
+        setErrors(nextErrors);
+        setFormError("Check the highlighted details before placing the order.");
+        const firstField = Object.keys(nextErrors)[0];
+        document.getElementById(`checkout-${firstField}`)?.focus();
+        return;
+      }
+    }
+
+    setSubmitting(true);
+    setFormError("");
+    setPaymentMessage("");
+    setPaymentState("starting");
+
+    try {
+      const session =
+        onlineOrder && (retry || onlineOrder.paymentRetryable)
+          ? await retryRazorpayCheckout(onlineOrder.id)
+          : await onStartRazorpay(checkoutDetails(), coupon);
+
+      await runRazorpayPayment(session);
+    } catch (error) {
+      setPaymentState("failed");
+      setPaymentMessage(
+        error?.message ||
+          "The online payment could not be started. Your order was not charged.",
+      );
+
+      if (error?.status === 409) {
+        onReloadCart();
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
   const handleSubmit = async (event) => {
     event.preventDefault();
 
     if (submitting) return;
+
+    if (paymentMethod === "razorpay") {
+      await startOnlinePayment();
+      return;
+    }
 
     const nextErrors = validate();
     if (Object.keys(nextErrors).length) {
@@ -1956,7 +2130,7 @@ function Checkout({
     setFormError("");
 
     try {
-      const order = await onPlaceOrder({ ...form, notes: "" }, coupon);
+      const order = await onPlaceOrder(checkoutDetails(), coupon);
       setPlacedOrder(order);
     } catch (error) {
       setFormError(
@@ -1984,11 +2158,16 @@ function Checkout({
 
       <DemoNotice>
         Checkout is processed by the Nivora server. Prices, stock, discounts
-        and shipping are recalculated when you place the order. Cash on delivery
-        only; no online payment is processed.
+        and shipping are recalculated when you place the order. Razorpay runs in
+        test mode in this build, and cash on delivery is also available.
       </DemoNotice>
       <div aria-live="polite">
         {formError && <DemoNotice tone="error">{formError}</DemoNotice>}
+        {paymentMessage && (
+          <DemoNotice tone={paymentState === "failed" ? "error" : "info"}>
+            {paymentMessage}
+          </DemoNotice>
+        )}
       </div>
 
       <form className="checkout-layout" onSubmit={handleSubmit} noValidate>
@@ -2164,15 +2343,60 @@ function Checkout({
           <section className="form-section">
             <h2>Payment preference</h2>
             <label className="radio-row">
-              <input type="radio" name="payment" defaultChecked />
+              <input
+                type="radio"
+                name="payment"
+                value="cod"
+                checked={paymentMethod === "cod"}
+                onChange={() => {
+                  setPaymentMethod("cod");
+                  setPaymentMessage("");
+                  setPaymentState("idle");
+                }}
+                disabled={submitting}
+              />
               Cash on delivery
               <small>Pay when your order arrives</small>
             </label>
             <label className="radio-row">
-              <input type="radio" name="payment" disabled />
-              Online payment
-              <small>Not available in this phase</small>
+              <input
+                type="radio"
+                name="payment"
+                value="razorpay"
+                checked={paymentMethod === "razorpay"}
+                onChange={() => {
+                  setPaymentMethod("razorpay");
+                  setPaymentMessage("");
+                  setPaymentState("idle");
+                }}
+                disabled={submitting}
+              />
+              Pay online with Razorpay
+              <small>UPI, cards and net banking · INR · test mode</small>
             </label>
+            {paymentMethod === "razorpay" && (
+              <small className="block pt-1 text-[9px] leading-relaxed text-[var(--muted)]">
+                Card and UPI details are entered in Razorpay&apos;s checkout.
+                Nivora receives only payment references, which the server
+                verifies before marking the order paid.
+              </small>
+            )}
+            {onlineOrder &&
+              ["cancelled", "failed", "pending"].includes(paymentState) && (
+                <button
+                  type="button"
+                  className="button outline mt-3"
+                  onClick={() => {
+                    setPaymentMethod("razorpay");
+                    void startOnlinePayment({ retry: true });
+                  }}
+                  disabled={submitting}
+                >
+                  {submitting
+                    ? "Opening Razorpay…"
+                    : `Retry payment for ${onlineOrder.id}`}
+                </button>
+              )}
           </section>
         </div>
 
@@ -2236,13 +2460,26 @@ function Checkout({
           <button
             type="submit"
             className="button primary full"
-            disabled={submitting || couponBusy}
+            disabled={submitting || couponBusy || paymentLocked}
           >
-            {submitting ? "Placing order…" : "Place order"}
+            {submitLabel}
           </button>
+          {onlineOrder && (
+            <small>
+              Unpaid order{" "}
+              <a className="text-link" href={`#/orders/${onlineOrder.id}`}>
+                {onlineOrder.id}
+              </a>{" "}
+              is saved
+              {retryableOrder
+                ? ". Retrying pays for that saved order and its delivery details."
+                : ". You can also retry it from your order details."}
+            </small>
+          )}
           <small>
-            Cash on delivery only. Stock, discounts and totals are confirmed by
-            the server when the order is placed.
+            {paymentMethod === "razorpay"
+              ? "The server confirms the captured amount before the order is marked paid. Razorpay test mode only; no real money is charged."
+              : "Cash on delivery. Stock, discounts and totals are confirmed by the server when the order is placed."}
           </small>
         </aside>
       </form>
@@ -2587,8 +2824,8 @@ function OrdersPage({ orders, status, error, onRetry }) {
       <p className="eyebrow">Your Nivora</p>
       <h1>Order history</h1>
       <p className="muted">
-        Orders placed with your Nivora account. Cash on delivery orders are
-        confirmed by the server.
+        Orders placed with your Nivora account. Cash on delivery and Razorpay
+        payments are both confirmed by the server.
       </p>
 
       {status === "loading" || status === "idle" ? (
@@ -2611,7 +2848,8 @@ function OrdersPage({ orders, status, error, onRetry }) {
               <b>{order.id}</b>
               <small>
                 Placed {formatDate(order.createdAt)} ·{" "}
-                {(order.items || []).map((item) => item.name).join(", ")}
+                {(order.items || []).map((item) => item.name).join(", ")} ·{" "}
+                Payment {order.paymentStatus || "Pending"}
               </small>
             </div>
             <span className="status-pill">{order.status}</span>
@@ -2642,6 +2880,9 @@ function OrderDetail({ orderId }) {
     error: "",
     notFound: false,
   });
+  const [paymentState, setPaymentState] = useState("idle");
+  const [paymentMessage, setPaymentMessage] = useState("");
+  const { openCheckout } = useRazorpayCheckout();
 
   useEffect(() => {
     if (!orderId) {
@@ -2692,6 +2933,64 @@ function OrderDetail({ orderId }) {
       controller.abort();
     };
   }, [orderId, attempt]);
+
+  const paymentBusy = ["starting", "awaiting", "verifying"].includes(
+    paymentState,
+  );
+
+  const retryPayment = async () => {
+    if (!state.order?.paymentRetryable || paymentBusy) return;
+
+    setPaymentState("starting");
+    setPaymentMessage("");
+
+    try {
+      const session = await retryRazorpayCheckout(state.order.id);
+      setState((current) => ({ ...current, order: session.order }));
+      setPaymentState("awaiting");
+
+      const result = await openCheckout(session.payment);
+
+      if (result.status === "cancelled") {
+        setPaymentState("cancelled");
+        setPaymentMessage(
+          "Payment was cancelled. This order is still unpaid; you can retry while the payment window is open.",
+        );
+        return;
+      }
+
+      if (result.status === "failed") {
+        setPaymentState("failed");
+        setPaymentMessage(
+          result.error ||
+            "The payment was not completed. This order is still unpaid and can be retried.",
+        );
+        return;
+      }
+
+      setPaymentState("verifying");
+      const outcome = await verifyRazorpayPayment(result.response);
+      setState((current) => ({ ...current, order: outcome.order }));
+      setPaymentState(
+        outcome.verified
+          ? "idle"
+          : outcome.order.paymentStatus === "Failed"
+            ? "failed"
+            : "pending",
+      );
+      setPaymentMessage(
+        outcome.verified
+          ? ""
+          : outcome.message ||
+              "The payment is still being confirmed. Check this order again shortly.",
+      );
+    } catch (error) {
+      setPaymentState("failed");
+      setPaymentMessage(
+        error?.message || "The online payment could not be retried.",
+      );
+    }
+  };
 
   if (state.status === "loading") {
     return (
@@ -2828,7 +3127,40 @@ function OrderDetail({ orderId }) {
             {order.payment || "Cash on delivery"} ·{" "}
             {order.paymentStatus || "Pending"}
           </p>
+          {order.paymentIssue && (
+            <p className="text-[var(--terracotta)]">{order.paymentIssue}</p>
+          )}
           <p>Order status: {order.status}</p>
+          {order.paymentMethod === "Razorpay" &&
+            order.paymentExpiresAt &&
+            order.paymentRetryable && (
+              <p>
+                Payment window open until {formatTime(order.paymentExpiresAt)}.
+              </p>
+            )}
+          {paymentMessage && (
+            <DemoNotice tone={paymentState === "failed" ? "error" : "info"}>
+              {paymentMessage}
+            </DemoNotice>
+          )}
+          {order.paymentRetryable && (
+            <button
+              type="button"
+              className="button primary"
+              onClick={retryPayment}
+              disabled={paymentBusy}
+            >
+              {paymentBusy ? "Opening Razorpay…" : "Retry online payment"}
+            </button>
+          )}
+          {order.paymentMethod === "Razorpay" &&
+            !order.paymentRetryable &&
+            order.paymentStatus !== "Paid" && (
+              <p>
+                This payment attempt can no longer be retried. Start a new
+                checkout from your bag to pay again.
+              </p>
+            )}
         </section>
       </div>
 
@@ -4065,6 +4397,9 @@ function AdminModal({ type, row, categories, session, close, onSaved }) {
               Payment method: {edit.paymentMethod || "Not recorded"}
               {edit.couponCode ? ` · Coupon ${edit.couponCode}` : ""}
             </p>
+            {edit.paymentIssue && (
+              <DemoNotice tone="error">{edit.paymentIssue}</DemoNotice>
+            )}
             <div className="field-grid">
               <label>
                 Order status

@@ -13,21 +13,52 @@ const formatDate = (value) => {
 
 export default function OrderConfirmation({ order }) {
   const address = order.address || order.shippingAddress || {};
+  const onlinePayment = order.paymentMethod === "Razorpay";
+  const paid = order.paymentStatus === "Paid";
+  const refundNeeded =
+    onlinePayment && paid && order.status === "Cancelled";
 
   return (
     <div className="mx-auto w-full max-w-4xl px-5 py-14 sm:px-8">
       <div className="mx-auto max-w-2xl">
         <div className="border border-[var(--line)] bg-[var(--surface)] p-6 sm:p-10">
           <p className="text-[9px] font-bold tracking-[0.16em] text-[var(--olive)] uppercase">
-            Order confirmed
+            {refundNeeded
+              ? "Payment received"
+              : onlinePayment && paid
+                ? "Payment confirmed"
+                : "Order confirmed"}
           </p>
           <h1 className="mt-3 font-['Playfair_Display',serif] text-[34px] leading-tight font-medium tracking-[-0.035em] sm:text-[44px]">
             Thank you, {address.firstName || "friend"}.
           </h1>
           <p className="mt-4 text-[12px] leading-7 text-[var(--muted)]">
-            Your order <b className="text-[var(--ink)]">{order.id}</b> has been
-            placed. We will prepare it for cash on delivery. No online payment
-            was taken.
+            {refundNeeded ? (
+              <>
+                Payment for order{" "}
+                <b className="text-[var(--ink)]">{order.id}</b> was received, but
+                the items are no longer available, so the order is cancelled.
+                Our team will contact you about a refund. Do not pay again.
+              </>
+            ) : onlinePayment && paid ? (
+              <>
+                Your order <b className="text-[var(--ink)]">{order.id}</b> is paid
+                and confirmed. The server verified the captured payment with
+                Razorpay, and we will prepare it for delivery.
+              </>
+            ) : onlinePayment ? (
+              <>
+                Your order <b className="text-[var(--ink)]">{order.id}</b> has
+                been saved, but the online payment is not confirmed. No payment
+                has been marked as received.
+              </>
+            ) : (
+              <>
+                Your order <b className="text-[var(--ink)]">{order.id}</b> has
+                been placed. We will prepare it for cash on delivery. No online
+                payment was taken.
+              </>
+            )}
           </p>
 
           <div className="mt-7 border-y border-[var(--line)] py-5">
@@ -91,13 +122,35 @@ export default function OrderConfirmation({ order }) {
                 <br />
                 Placed: {formatDate(order.createdAt)}
               </p>
+              {order.paymentIssue && (
+                <p className="mt-2 text-[var(--terracotta)]">
+                  {order.paymentIssue}
+                </p>
+              )}
             </div>
           </div>
 
-          <DemoNotice className="mt-7">
-            Cash on delivery only. Your order was saved by the Nivora server,
-            and stock was reserved when it was placed.
-          </DemoNotice>
+          {refundNeeded ? (
+            <DemoNotice tone="error" className="mt-7">
+              The captured payment needs a manual refund because the order was
+              cancelled. Support will follow up; no further payment is needed.
+            </DemoNotice>
+          ) : onlinePayment && paid ? (
+            <DemoNotice className="mt-7">
+              Razorpay test mode: no real money was charged. The Nivora server
+              confirmed the captured amount before marking this order paid.
+            </DemoNotice>
+          ) : onlinePayment ? (
+            <DemoNotice tone="error" className="mt-7">
+              The online payment is not confirmed. Open the order details to
+              check again or retry the payment.
+            </DemoNotice>
+          ) : (
+            <DemoNotice className="mt-7">
+              Cash on delivery only for this order. Your order was saved by the
+              Nivora server, and stock was reserved when it was placed.
+            </DemoNotice>
+          )}
 
           <div className="mt-7 flex flex-wrap gap-3">
             <a className="button primary" href={`#/orders/${order.id}`}>

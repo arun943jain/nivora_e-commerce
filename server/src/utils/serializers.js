@@ -65,6 +65,14 @@ const serializeAddress = (address) =>
       }
     : null;
 
+const paymentRetryable = (order) =>
+  order.paymentMethod === "Razorpay" &&
+  ["Pending", "Failed"].includes(order.paymentStatus || "Pending") &&
+  order.stockReserved !== false &&
+  order.status !== "Cancelled" &&
+  Boolean(order.paymentExpiresAt) &&
+  new Date(order.paymentExpiresAt).getTime() > Date.now();
+
 export const serializeOrder = (order) => {
   const shippingAddress = serializeAddress(order.shippingAddress);
 
@@ -100,6 +108,9 @@ export const serializeOrder = (order) => {
     payment: order.paymentMethod || "Cash on delivery",
     paymentMethod: order.paymentMethod || "Cash on delivery",
     paymentStatus: order.paymentStatus || "Pending",
+    paymentExpiresAt: order.paymentExpiresAt || null,
+    paymentRetryable: paymentRetryable(order),
+    paymentIssue: order.paymentIssue || "",
     status: order.status || "Pending",
     notes: order.notes || "",
     createdAt: order.createdAt,

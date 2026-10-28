@@ -1,6 +1,10 @@
 import mongoose from "mongoose";
 import { Order } from "../models/index.js";
 import {
+  PAYMENT_METHODS,
+  releaseOrderReservation,
+} from "../services/checkoutService.js";
+import {
   badRequest,
   conflict,
   notFound,
@@ -134,6 +138,46 @@ export const updateAdminOrderStatus = async (req, res) => {
         allowed.length > 0 ? allowed.join(", ") : "none"
       }.`,
     );
+  }
+
+  const isOnlinePayment = order.paymentMethod === PAYMENT_METHODS.RAZORPAY;
+
+  // Payment status is only ever changed by the gateway verification and
+  // webhook paths. Fulfilment is blocked while an online payment is unconfirmed.
+  if (
+    isOnlinePayment &&
+    order.paymentStatus !== "Paid" &&
+    status !== "Cancelled"
+  ) {
+    throw conflict(
+      "This online order has not been paid yet. It cannot be prepared or fulfilled until the payment is confirmed.",
+    );
+  }
+
+  if (isOnlinePayment && status === "Cancelled") {
+    if (order.paymentStatus === "Paid") {
+      throw conflict(
+        "Paid online orders cannot be cancelled until a refund workflow exists. Refund the payment in Razorpay first.",
+      );
+    }
+
+    if (order.stockReserved) {
+      // Releasing the reservation restores stock and coupon usage and marks the
+      // order cancelled in one transaction.
+      const released = await releaseOrderReservation({
+        orderId: order._id,
+        orderStatus: "Cancelled",
+        paymentStatus: "Failed",
+        paymentIssue: "Cancelled by the store before payment was completed.",
+      });
+
+      if (released) {
+        return res.status(200).json({
+          success: true,
+          data: { order: serializeAdminOrder(released) },
+        });
+      }
+    }
   }
 
   order.status = status;

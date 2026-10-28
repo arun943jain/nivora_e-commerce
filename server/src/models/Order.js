@@ -10,8 +10,67 @@ const ORDER_STATUSES = [
   "Delivered",
   "Cancelled",
 ];
+const PAYMENT_METHODS = [
+  "Cash on delivery",
+  "Razorpay",
+  "Card",
+  "UPI",
+  "Net banking",
+];
 const PAYMENT_STATUSES = ["Pending", "Paid", "Refunded", "Failed"];
-const PAYMENT_METHODS = ["Cash on delivery", "Card", "UPI", "Net banking"];
+
+const razorpayAttemptSchema = new Schema(
+  {
+    orderId: {
+      type: String,
+      required: true,
+      trim: true,
+      maxlength: [100, "Razorpay order ID is too long."],
+    },
+    paymentId: {
+      type: String,
+      trim: true,
+      default: "",
+      maxlength: [100, "Razorpay payment ID is too long."],
+    },
+    status: {
+      type: String,
+      enum: ["created", "paid", "failed"],
+      default: "created",
+    },
+    createdAt: {
+      type: Date,
+      default: Date.now,
+    },
+    resolvedAt: {
+      type: Date,
+      default: null,
+    },
+  },
+  { _id: false },
+);
+
+const razorpaySchema = new Schema(
+  {
+    orderId: {
+      type: String,
+      trim: true,
+      default: "",
+      maxlength: [100, "Razorpay order ID is too long."],
+    },
+    paymentId: {
+      type: String,
+      trim: true,
+      default: "",
+      maxlength: [100, "Razorpay payment ID is too long."],
+    },
+    attempts: {
+      type: [razorpayAttemptSchema],
+      default: [],
+    },
+  },
+  { _id: false },
+);
 
 const orderItemSchema = new Schema(
   {
@@ -163,6 +222,30 @@ const orderSchema = new Schema(
       },
       default: "Pending",
     },
+    // Online payments reserve stock until the gateway confirms capture. The
+    // expiry sweep releases abandoned reservations exactly once.
+    stockReserved: {
+      type: Boolean,
+      default: true,
+    },
+    paymentExpiresAt: {
+      type: Date,
+      default: null,
+    },
+    stockReleasedAt: {
+      type: Date,
+      default: null,
+    },
+    paymentIssue: {
+      type: String,
+      trim: true,
+      maxlength: [500, "Payment note cannot exceed 500 characters."],
+      default: "",
+    },
+    razorpay: {
+      type: razorpaySchema,
+      default: () => ({}),
+    },
     status: {
       type: String,
       enum: {
@@ -186,6 +269,10 @@ orderSchema.index({ user: 1, createdAt: -1 });
 orderSchema.index({ status: 1, createdAt: -1 });
 orderSchema.index({ "customer.email": 1, createdAt: -1 });
 orderSchema.index({ createdAt: -1 });
+// Payment lookups only ever use identifiers stored on the internal order.
+orderSchema.index({ "razorpay.orderId": 1 });
+orderSchema.index({ "razorpay.attempts.orderId": 1 });
+orderSchema.index({ paymentMethod: 1, paymentStatus: 1, paymentExpiresAt: 1 });
 
 export const Order = models.Order || model("Order", orderSchema);
 

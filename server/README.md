@@ -18,6 +18,10 @@ npm run dev
 accepts `lax`, `strict` or `none`; `none` requires HTTPS and is forced to a
 `Secure` cookie.
 
+Razorpay test keys are optional for local work. Without them the API still
+serves the storefront, but online payment endpoints return `503`. See the
+payments section below for the three variables and webhook setup.
+
 Without `MONGODB_URI` or `JWT_SECRET` the API still starts for catalogue and
 health checks, but registration, login and session endpoints return `503`.
 
@@ -65,8 +69,68 @@ expiry, minimum order and usage limit, and stores snapshots on the order.
 Guest carts remain in browser `localStorage` and are merged into the account
 cart on sign-in without exceeding stock.
 
-Only cash on delivery is supported. No payment provider is called and no
-online payment is implied.
+Cash on delivery remains available. Online payment with Razorpay is documented
+below and is restricted to test-mode keys in this build.
+
+## Razorpay test-mode payments
+
+Online payment is offered beside cash on delivery on the checkout page.
+`RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET` and `RAZORPAY_WEBHOOK_SECRET` are read
+from `server/.env`; only blank placeholders are committed in
+`server/.env.example`. This build accepts keys starting with `rzp_test_` only,
+so live credentials cannot be used and no real charge can be made. Until test
+keys are set, the endpoints below return `503`.
+
+| Method | Path                                            | Notes                                                                 |
+| ------ | ----------------------------------------------- | --------------------------------------------------------------------- |
+| POST   | `/api/payments/razorpay/checkout`               | Creates the internal order and a Razorpay order from the server cart. |
+| POST   | `/api/payments/razorpay/orders/:orderId/retry`  | Reopens checkout for an unpaid order while its reservation is valid.  |
+| POST   | `/api/payments/razorpay/verify`                 | Verifies the checkout result on the server, then settles the order.   |
+| POST   | `/api/payments/razorpay/webhook`                | Razorpay-to-server webhook; authenticated by HMAC, not a session.     |
+
+The authenticated endpoints use the server-side cart and checkout details.
+Amounts, discount, shipping and line items always come from MongoDB and are
+sent to Razorpay as integer paise; the API rejects totals below ₹1 for online
+payment and never trusts a client total. The public key id is returned for
+Checkout, while the key secret and webhook secret never leave the server.
+
+Creating an online order decrements stock and increments coupon usage in the
+same MongoDB transaction as cash on delivery. The reservation is held for 20
+minutes. A pending or failed online reservation blocks a second online checkout
+and cash on delivery for the same cart until it is retried or expires. A sweep
+runs every 60 seconds, checks the gateway (including captured payments) and
+releases expired reservations exactly once, restoring stock and coupon usage
+without any non-transactional fallback.
+
+The browser callback is not proof of payment. Verification:
+
+1. Locates the signed-in user's order and uses the Razorpay order id stored on
+   that internal order, not the id supplied by the browser.
+2. Verifies the checkout HMAC with the key secret.
+3. Fetches the payment from Razorpay and checks its `order_id`, amount and INR
+   currency against the stored order total.
+4. Captures an `authorized` payment server-side with the exact amount, then
+   requires `status: "captured"` before marking the order paid.
+
+If a capture arrives after the reservation expired, the server re-reserves the
+stock inside a transaction. If the items are gone, the payment is still
+recorded as `Paid` and the order as `Cancelled` with a manual-refund note; stock
+is never decremented below zero.
+
+Webhook signatures are verified with HMAC-SHA256 over the exact raw request
+body using `RAZORPAY_WEBHOOK_SECRET`. The route is mounted with raw-body
+middleware before the JSON parser, so other routes keep normal JSON parsing.
+Deliveries are de-duplicated with a unique event id in `PaymentEvent`
+(`x-razorpay-event-id`, or a SHA-256 of the raw body when absent).
+`payment.captured` and `order.paid` settle an order; `payment.failed` marks an
+unsettled attempt failed; other events are acknowledged and ignored. `Paid` and
+`Refunded` states are never downgraded, and late failure events are ignored
+after settlement.
+
+No live credentials, gateway calls or real test transaction were used during
+this phase. The API and frontend were checked at code level; a Razorpay test
+account, a transaction-capable MongoDB and a publicly reachable webhook URL are
+required to exercise the gateway end to end.
 
 ## Protected administration API
 
@@ -100,8 +164,12 @@ Order status updates use an explicit transition list:
 `Pending → Preparing | Cancelled`, `Preparing → Shipped | Cancelled`,
 `Shipped → Delivered`, and no outgoing transitions from `Delivered` or
 `Cancelled`. A same-status request is accepted as a no-op. Status updates never
-write item prices, customer snapshots, totals or payment status; payment status
-remains read-only until a payment provider exists.
+write item prices, customer snapshots, totals or payment status. Payment status
+is read-only in the admin API and UI; only gateway verification and webhooks
+change it. Unpaid online orders cannot move to `Preparing` or later, and paid
+online orders cannot be cancelled until a refund workflow exists. Cancelling an
+unpaid online order releases its stock reservation and coupon usage in a
+transaction.
 
 Coupon updates cannot change `usedCount`, and the API rejects attempts to set
 it. A percentage discount cannot exceed 100, a usage limit cannot fall below
@@ -115,12 +183,14 @@ emails or other sensitive fields beyond the order list itself.
 ### Transaction requirement
 
 Placing an order decrements stock, increments coupon usage, creates the order
-and clears the cart in one MongoDB transaction. The deployment database must
-therefore be a replica set or a sharded cluster. The API checks this before
-checkout and returns `503` with a clear message for a standalone MongoDB; it
-never falls back to a non-transactional order path that could leave stock and
-orders out of sync. Local single-node MongoDB servers normally need to be
-started as a single-node replica set before checkout can be used.
+and clears the cart in one MongoDB transaction. Online payment reservations use
+the same transaction and are released by another transaction when they expire.
+The deployment database must therefore be a replica set or a sharded cluster.
+The API checks this before checkout and returns `503` with a clear message for a
+standalone MongoDB; it never falls back to a non-transactional order path that
+could leave stock and orders out of sync. Local single-node MongoDB servers
+normally need to be started as a single-node replica set before checkout can be
+used.
 
 ## Manual administrator promotion
 

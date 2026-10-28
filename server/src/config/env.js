@@ -75,6 +75,18 @@ const parseCookieSameSite = (value) => {
 
 const mongodbUri = String(process.env.MONGODB_URI || "").trim();
 const jwtSecret = String(process.env.JWT_SECRET || "").trim();
+const razorpayKeyId = String(process.env.RAZORPAY_KEY_ID || "").trim();
+const razorpayKeySecret = String(process.env.RAZORPAY_KEY_SECRET || "").trim();
+const razorpayWebhookSecret = String(
+  process.env.RAZORPAY_WEBHOOK_SECRET || "",
+).trim();
+
+const razorpayConfigured = Boolean(
+  razorpayKeyId.length > 0 && razorpayKeySecret.length > 0,
+);
+// This phase ships test-mode integration only. Live keys are rejected until
+// the deployment phase explicitly enables them.
+const razorpayTestMode = razorpayKeyId.startsWith("rzp_test_");
 
 if (isProduction) {
   if (!mongodbUri) {
@@ -97,4 +109,11 @@ export const env = Object.freeze({
   jwtSecret,
   jwtExpiresIn: String(process.env.JWT_EXPIRES_IN || "7d").trim(),
   authConfigured: jwtSecret.length >= 32,
+  razorpayKeyId,
+  razorpayKeySecret,
+  razorpayWebhookSecret,
+  razorpayConfigured,
+  razorpayTestMode,
+  razorpayEnabled: razorpayConfigured && razorpayTestMode,
+  razorpayWebhookConfigured: razorpayWebhookSecret.length > 0,
 });

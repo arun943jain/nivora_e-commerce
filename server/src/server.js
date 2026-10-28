@@ -1,9 +1,38 @@
 import app from "./app.js";
-import { connectDatabase, disconnectDatabase } from "./config/db.js";
+import {
+  connectDatabase,
+  disconnectDatabase,
+  getDatabaseStatus,
+} from "./config/db.js";
 import { env } from "./config/env.js";
+import { releaseExpiredRazorpayOrders } from "./services/paymentService.js";
 
 let server;
+let paymentSweep;
 let shuttingDown = false;
+
+const SWEEP_INTERVAL_MS = 60 * 1000;
+
+const startPaymentSweep = (databaseConnected) => {
+  if (!env.razorpayEnabled || !databaseConnected) return;
+
+  paymentSweep = setInterval(async () => {
+    if (getDatabaseStatus() !== "connected") return;
+
+    try {
+      const released = await releaseExpiredRazorpayOrders();
+
+      if (released > 0) {
+        console.log(
+          `[payments] Released ${released} expired stock reservation(s).`,
+        );
+      }
+    } catch (error) {
+      console.error(`[payments] Expiry sweep failed: ${error.message}`);
+    }
+  }, SWEEP_INTERVAL_MS);
+  paymentSweep.unref();
+};
 
 const startServer = async () => {
   const database = await connectDatabase();
@@ -24,6 +53,18 @@ const startServer = async () => {
         "[server] JWT_SECRET is not configured. Authentication endpoints will return 503 until it is set.",
       );
     }
+
+    if (!env.razorpayEnabled) {
+      console.warn(
+        "[server] Razorpay test keys are not configured. Online payment endpoints will return 503 until RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET are set.",
+      );
+    } else if (!env.razorpayWebhookConfigured) {
+      console.warn(
+        "[server] RAZORPAY_WEBHOOK_SECRET is not configured. Webhook deliveries will be rejected.",
+      );
+    }
+
+    startPaymentSweep(database.connected);
   });
 
   server.on("error", (error) => {
@@ -44,6 +85,10 @@ const shutdown = async (signal) => {
   forceExit.unref();
 
   try {
+    if (paymentSweep) {
+      clearInterval(paymentSweep);
+      paymentSweep = null;
+    }
     if (server) {
       await new Promise((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));

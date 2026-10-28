@@ -19,4 +19,6 @@ export const notFound = (message) => new HttpError(404, message);
 
 export const conflict = (message) => new HttpError(409, message);
 
+export const badGateway = (message) => new HttpError(502, message);
+
 export const serviceUnavailable = (message) => new HttpError(503, message);
