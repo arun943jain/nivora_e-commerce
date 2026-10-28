@@ -18,6 +18,12 @@ const startServer = async () => {
         `[server] Database status: ${database.reason}. /api/health is available for checks.`,
       );
     }
+
+    if (!env.authConfigured) {
+      console.warn(
+        "[server] JWT_SECRET is not configured. Authentication endpoints will return 503 until it is set.",
+      );
+    }
   });
 
   server.on("error", (error) => {

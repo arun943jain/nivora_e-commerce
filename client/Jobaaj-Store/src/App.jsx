@@ -4,9 +4,10 @@ import {
   fetchProductBySlug,
   fetchProducts,
 } from "./api/catalogue.js";
+import { useAuth } from "./auth/authContext.js";
+import AuthGate from "./components/AuthGate.jsx";
 import CatalogueStatus from "./components/CatalogueStatus.jsx";
 import { categories, products, orders, users, coupons } from "./data/store.js";
-import DemoGate from "./components/DemoGate.jsx";
 import DemoNotice from "./components/DemoNotice.jsx";
 import OrderConfirmation from "./components/OrderConfirmation.jsx";
 import useCatalogueListing from "./hooks/useCatalogueListing.js";
@@ -52,6 +53,10 @@ const decodeSegment = (value) => {
     return value;
   }
 };
+const safeNextPath = (value) =>
+  typeof value === "string" && value.startsWith("/") && !value.startsWith("//")
+    ? value
+    : "";
 const couponDiscount = (code, subtotal, couponList) => {
   const normalized = String(code || "").trim().toUpperCase();
   if (!normalized) return 0;
@@ -70,6 +75,7 @@ const couponDiscount = (code, subtotal, couponList) => {
 };
 
 function App() {
+  const { user: session, status: authStatus, logout } = useAuth();
   const [route, setRoute] = useState(location.hash.slice(1) || "/");
   const [dark, setDark] = useState(
     () => localStorage.getItem("nivora-theme") === "dark",
@@ -102,7 +108,6 @@ function App() {
     read("nivora-coupons", coupons),
   );
   const [reviews, setReviews] = useState(() => read("nivora-reviews", {}));
-  const [session, setSession] = useState(() => read("nivora-session", null));
   const [catalogue, setCatalogue] = useState({
     products: null,
     categories: null,
@@ -159,6 +164,11 @@ function App() {
     return () => window.removeEventListener("hashchange", onHash);
   }, []);
   useEffect(() => {
+    // Older demo builds stored a fake session here. It must never be treated
+    // as authentication, so remove any leftover value.
+    localStorage.removeItem("nivora-session");
+  }, []);
+  useEffect(() => {
     localStorage.setItem("nivora-theme", dark ? "dark" : "light");
     document.documentElement.dataset.theme = dark ? "dark" : "light";
   }, [dark]);
@@ -169,7 +179,6 @@ function App() {
   useEffect(() => save("nivora-users", userList), [userList]);
   useEffect(() => save("nivora-coupons", couponList), [couponList]);
   useEffect(() => save("nivora-reviews", reviews), [reviews]);
-  useEffect(() => save("nivora-session", session), [session]);
   useEffect(() => {
     const controller = new AbortController();
 
@@ -266,7 +275,12 @@ function App() {
   }, [notice]);
 
   const go = (next) => {
-    location.hash = next;
+    const target = next.startsWith("/") ? next : "/";
+    setRoute(target);
+
+    if (location.hash.slice(1) !== target) {
+      location.hash = target;
+    }
   };
   const retryCatalogue = () => {
     setCatalogue((current) => ({
@@ -369,43 +383,14 @@ function App() {
     [category, minPrice, productList, query, sort],
   );
 
-  const authenticate = (demoUser, next) => {
-    const role =
-      String(demoUser.role || "Customer").toLowerCase() === "admin"
-        ? "admin"
-        : "customer";
-    const nextSession = {
-      name: demoUser.name,
-      email: demoUser.email.toLowerCase(),
-      role,
-      demo: true,
-    };
-    setSession(nextSession);
-    setNotice(`Demo ${role} session started`);
-    go(next && next.startsWith("/") ? next : "/account");
-  };
-  const registerDemoUser = (demoUser) => {
-    setUserList((items) => {
-      if (items.some((item) => item.email.toLowerCase() === demoUser.email)) {
-        return items;
-      }
-      return [
-        {
-          id: `U-${Date.now().toString().slice(-5)}`,
-          name: demoUser.name,
-          email: demoUser.email,
-          joined: formatDate(),
-          role: demoUser.role,
-          status: "Active",
-        },
-        ...items,
-      ];
-    });
-  };
-  const logout = () => {
-    setSession(null);
-    setNotice("Signed out of the demo session");
-    go("/");
+  const signOut = async () => {
+    try {
+      await logout();
+      setNotice("Signed out");
+      go("/");
+    } catch (error) {
+      setNotice(error?.message || "Unable to sign out. Please try again.");
+    }
   };
   const addReview = (productId, review) => {
     setReviews((items) => ({
@@ -679,37 +664,13 @@ function App() {
           />
         )}
         {routePath === "/login" && (
-          <Auth
-            mode="login"
-            users={userList}
-            session={session}
-            nextPath={nextPath}
-            onAuthenticate={authenticate}
-            onRegister={registerDemoUser}
-            setNotice={setNotice}
-          />
+          <Auth mode="login" nextPath={nextPath} setNotice={setNotice} />
         )}
         {routePath === "/register" && (
-          <Auth
-            mode="register"
-            users={userList}
-            session={session}
-            nextPath={nextPath}
-            onAuthenticate={authenticate}
-            onRegister={registerDemoUser}
-            setNotice={setNotice}
-          />
+          <Auth mode="register" nextPath={nextPath} setNotice={setNotice} />
         )}
         {routePath === "/recover" && (
-          <Auth
-            mode="recover"
-            users={userList}
-            session={session}
-            nextPath={nextPath}
-            onAuthenticate={authenticate}
-            onRegister={registerDemoUser}
-            setNotice={setNotice}
-          />
+          <Auth mode="recover" nextPath={nextPath} setNotice={setNotice} />
         )}
         {routePath === "/account" &&
           (session ? (
@@ -717,12 +678,14 @@ function App() {
               session={session}
               orders={orderList}
               wish={wish}
-              onLogout={logout}
+              onLogout={signOut}
             />
           ) : (
-            <DemoGate
+            <AuthGate
+              status={authStatus}
+              user={session}
               title="Sign in to your account"
-              copy="The account area is protected in this frontend demo. Sign in locally to see your demo profile, saved address and order history."
+              copy="Your profile, saved pieces and order history are available after you sign in."
               next="/account"
             />
           ))}
@@ -730,9 +693,11 @@ function App() {
           (session ? (
             <OrdersPage orders={orderList} />
           ) : (
-            <DemoGate
+            <AuthGate
+              status={authStatus}
+              user={session}
               title="Order history is protected"
-              copy="This demonstration keeps orders in browser storage. Sign in to view the demo order history."
+              copy="Sign in to view the order history saved in this browser."
               next="/orders"
             />
           ))}
@@ -740,9 +705,11 @@ function App() {
           (session ? (
             <OrderDetail order={currentOrder} />
           ) : (
-            <DemoGate
+            <AuthGate
+              status={authStatus}
+              user={session}
               title="Order details are protected"
-              copy="Sign in with the local demo account to view the selected order."
+              copy="Sign in to view the selected order."
               next={routePath}
             />
           ))}
@@ -764,12 +731,13 @@ function App() {
               onDeleteCoupon={deleteCoupon}
             />
           ) : (
-            <DemoGate
+            <AuthGate
+              status={authStatus}
+              user={session}
               title="Admin workspace"
-              copy="The admin area is protected in this frontend demo. Sign in as the demo admin to manage local products, orders, customers and coupons."
-              next="/admin"
+              copy="This area is limited to Nivora administrators. Sign in with an administrator account to continue."
+              next={routePath}
               adminOnly
-              session={session}
             />
           ))}
         {![
@@ -1981,31 +1949,23 @@ function Checkout({
     </div>
   );
 }
-function Auth({
-  mode,
-  users,
-  session,
-  nextPath,
-  onAuthenticate,
-  onRegister,
-  setNotice,
-}) {
+function Auth({ mode, nextPath, setNotice }) {
   const register = mode === "register";
   const recover = mode === "recover";
+  const { login, register: registerUser, restoreError } = useAuth();
   const [show, setShow] = useState(false);
   const [form, setForm] = useState({
     name: "",
-    email: session?.email || "",
+    email: "",
     password: "",
     confirm: "",
   });
   const [error, setError] = useState("");
-  const [success, setSuccess] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
   const updateField = (field, value) => {
     setForm((current) => ({ ...current, [field]: value }));
     setError("");
-    setSuccess("");
   };
   const nextQuery = nextPath
     ? `?next=${encodeURIComponent(nextPath)}`
@@ -2014,8 +1974,37 @@ function Auth({
   const registerHref = `#/register${nextQuery}`;
   const recoverHref = `#/recover${nextQuery}`;
 
-  const handleSubmit = (event) => {
+  if (recover) {
+    return (
+      <div className="auth-wrap">
+        <p className="eyebrow">Welcome to Nivora</p>
+        <h1>Password recovery isn’t available yet.</h1>
+        <p className="muted">
+          This build does not include a password-reset email service.
+        </p>
+
+        <DemoNotice>
+          No reset email has been sent. Recovery is not available in this
+          build, so no password can be changed here. Return to sign in or create
+          a new account.
+        </DemoNotice>
+
+        <div className="auth-links">
+          <a className="button primary" href={loginHref}>
+            Back to sign in
+          </a>
+          <br />
+          New here? <a href={registerHref}>Create account</a>
+        </div>
+      </div>
+    );
+  }
+
+  const handleSubmit = async (event) => {
     event.preventDefault();
+
+    if (submitting) return;
+
     const email = form.email.trim().toLowerCase();
 
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
@@ -2023,20 +2012,16 @@ function Auth({
       return;
     }
 
-    if (recover) {
-      setSuccess(
-        "Demo recovery request accepted. No email was sent and no password was changed.",
-      );
-      setNotice("Demo password recovery only");
-      return;
-    }
-
     if (register && form.name.trim().length < 2) {
       setError("Enter your full name.");
       return;
     }
-    if (form.password.length < 8) {
-      setError("Use at least 8 characters for the demo password.");
+    if (!form.password) {
+      setError("Enter your password.");
+      return;
+    }
+    if (register && form.password.length < 8) {
+      setError("Use at least 8 characters for your password.");
       return;
     }
     if (register && form.password !== form.confirm) {
@@ -2044,67 +2029,59 @@ function Auth({
       return;
     }
 
-    const existing = users.find(
-      (user) => user.email.toLowerCase() === email,
-    );
-    if (register && existing) {
-      setError("That demo email is already registered. Sign in instead.");
-      return;
-    }
+    setSubmitting(true);
+    setError("");
 
-    const role =
-      email === "admin@nivora.demo" ||
-      existing?.role?.toLowerCase() === "admin"
-        ? "Admin"
-        : "Customer";
-    const name =
-      register || existing
-        ? form.name.trim() || existing?.name || email.split("@")[0]
-        : email === "admin@nivora.demo"
-          ? "Nivora Admin"
-          : email.split("@")[0];
-    const demoUser = { name, email, role };
+    try {
+      if (register) {
+        await registerUser({
+          name: form.name.trim(),
+          email,
+          password: form.password,
+        });
+        setNotice("Account created");
+      } else {
+        await login({ email, password: form.password });
+        setNotice("Signed in");
+      }
 
-    if (register) {
-      onRegister(demoUser);
-      setNotice("Demo account created in this browser");
+      location.hash = safeNextPath(nextPath) || "/account";
+    } catch (error) {
+      setError(
+        error?.message ||
+          (register
+            ? "Unable to create your account. Please try again."
+            : "Unable to sign in. Please try again."),
+      );
+    } finally {
+      setSubmitting(false);
     }
-    onAuthenticate(demoUser, nextPath);
   };
 
   return (
     <div className="auth-wrap">
       <p className="eyebrow">Welcome to Nivora</p>
       <h1>
-        {register
-          ? "Create your account"
-          : recover
-            ? "Reset your password"
-            : "Good to have you back."}
+        {register ? "Create your account" : "Good to have you back."}
       </h1>
       <p className="muted">
         {register
           ? "A home for your favourite pieces."
-          : recover
-            ? "Enter your email to preview a reset request."
-            : "Sign in to see your saved pieces and orders."}
+          : "Sign in to see your saved pieces and orders."}
       </p>
 
       <DemoNotice>
-        Frontend demo only. Any password of 8 or more characters is accepted
-        locally. Passwords are never stored, checked against a server or sent
-        anywhere. Use <b>admin@nivora.demo</b> to preview the admin workspace.
+        Sign-in is handled by the Nivora API. Your password is sent only when
+        you submit this form, stored as a one-way hash on the server, and never
+        kept in browser storage.
       </DemoNotice>
 
-      {session && (
-        <p className="muted">
-          Current demo session: <b>{session.email}</b> ({session.role}).
-        </p>
-      )}
-
       <div aria-live="polite">
-        {error && <DemoNotice tone="error">{error}</DemoNotice>}
-        {success && <DemoNotice tone="success">{success}</DemoNotice>}
+        {error ? (
+          <DemoNotice tone="error">{error}</DemoNotice>
+        ) : restoreError ? (
+          <DemoNotice tone="error">{restoreError}</DemoNotice>
+        ) : null}
       </div>
 
       <form className="auth-form" onSubmit={handleSubmit} noValidate>
@@ -2130,30 +2107,28 @@ function Auth({
             aria-invalid={Boolean(error)}
           />
         </label>
-        {!recover && (
-          <label>
-            Password
-            <div className="password-field">
-              <input
-                type={show ? "text" : "password"}
-                minLength="8"
-                autoComplete={register ? "new-password" : "current-password"}
-                value={form.password}
-                onChange={(event) =>
-                  updateField("password", event.target.value)
-                }
-                aria-invalid={Boolean(error)}
-              />
-              <button
-                type="button"
-                onClick={() => setShow(!show)}
-                aria-label={show ? "Hide password" : "Show password"}
-              >
-                {show ? "Hide" : "Show"}
-              </button>
-            </div>
-          </label>
-        )}
+        <label>
+          Password
+          <div className="password-field">
+            <input
+              type={show ? "text" : "password"}
+              minLength="8"
+              autoComplete={register ? "new-password" : "current-password"}
+              value={form.password}
+              onChange={(event) =>
+                updateField("password", event.target.value)
+              }
+              aria-invalid={Boolean(error)}
+            />
+            <button
+              type="button"
+              onClick={() => setShow(!show)}
+              aria-label={show ? "Hide password" : "Show password"}
+            >
+              {show ? "Hide" : "Show"}
+            </button>
+          </div>
+        </label>
         {register && (
           <label>
             Confirm password
@@ -2167,20 +2142,24 @@ function Auth({
             />
           </label>
         )}
-        <button type="submit" className="button primary full">
-          {register
-            ? "Create demo account"
-            : recover
-              ? "Preview reset request"
-              : "Sign in to demo"}
+        <button
+          type="submit"
+          className="button primary full"
+          disabled={submitting}
+        >
+          {submitting
+            ? register
+              ? "Creating account…"
+              : "Signing in…"
+            : register
+              ? "Create account"
+              : "Sign in"}
         </button>
       </form>
 
       <div className="auth-links">
         {register ? (
           <>Have an account? <a href={loginHref}>Sign in</a></>
-        ) : recover ? (
-          <>Remembered it? <a href={loginHref}>Sign in</a></>
         ) : (
           <>
             <a href={recoverHref}>Forgot password?</a>
@@ -2202,8 +2181,8 @@ function Account({ session, orders, wish, onLogout }) {
       <p className="eyebrow">Your Nivora</p>
       <h1>Account overview</h1>
       <p className="muted">
-        Demo profile stored in this browser. This is not a server-backed
-        account.
+        Signed in with your Nivora account. Your password is managed by the
+        server.
       </p>
 
       <div className="account-grid">
@@ -2215,7 +2194,7 @@ function Account({ session, orders, wish, onLogout }) {
           <p>{session.email}</p>
           <p>
             <span className="status-pill">
-              {session.role === "admin" ? "Demo admin" : "Demo customer"}
+              {session.role === "admin" ? "Administrator" : "Customer"}
             </span>
           </p>
           <button type="button" className="button outline" onClick={onLogout}>
@@ -2280,8 +2259,8 @@ function Account({ session, orders, wish, onLogout }) {
       </div>
 
       <DemoNotice className="mt-6">
-        Signing out only clears the local demo session. It does not affect real
-        accounts or server data.
+        Signing out clears the server-issued session cookie. Order history and
+        wishlists in this build remain browser demo data.
       </DemoNotice>
     </div>
   );
@@ -2293,8 +2272,8 @@ function OrdersPage({ orders }) {
       <p className="eyebrow">Your Nivora</p>
       <h1>Order history</h1>
       <p className="muted">
-        Sample orders plus orders placed in this browser. Demo records are shared
-        by any local sign-in and are not tied to a real customer account.
+        Sample orders plus orders placed in this browser. These are local demo
+        records and are not tied to your server account.
       </p>
       <DemoNotice>
         These orders are frontend demo records. The admin workspace can update

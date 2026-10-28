@@ -63,6 +63,16 @@ const parseClientOrigin = (value) => {
   return url.origin;
 };
 
+const parseCookieSameSite = (value) => {
+  const raw = String(value || "lax").trim().toLowerCase();
+
+  if (!["lax", "strict", "none"].includes(raw)) {
+    throw new Error("COOKIE_SAME_SITE must be lax, strict or none.");
+  }
+
+  return raw;
+};
+
 const mongodbUri = String(process.env.MONGODB_URI || "").trim();
 const jwtSecret = String(process.env.JWT_SECRET || "").trim();
 
@@ -83,6 +93,8 @@ export const env = Object.freeze({
   port: parsePort(process.env.PORT),
   mongodbUri,
   clientOrigin: parseClientOrigin(process.env.CLIENT_ORIGIN),
+  cookieSameSite: parseCookieSameSite(process.env.COOKIE_SAME_SITE),
   jwtSecret,
   jwtExpiresIn: String(process.env.JWT_EXPIRES_IN || "7d").trim(),
+  authConfigured: jwtSecret.length >= 32,
 });

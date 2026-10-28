@@ -24,7 +24,8 @@ const userSchema = new Schema(
       match: [EMAIL_PATTERN, "Email address is not valid."],
       set: normalizeEmail,
     },
-    // Only a password hash may ever be stored here. Authentication is a later phase.
+    // Only a password hash may ever be stored here. Plaintext passwords are
+    // never saved.
     passwordHash: {
       type: String,
       select: false,

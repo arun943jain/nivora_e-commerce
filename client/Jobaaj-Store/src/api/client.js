@@ -27,7 +27,10 @@ const readJson = async (response) => {
   }
 };
 
-export const apiRequest = async (path, { signal, timeoutMs } = {}) => {
+export const apiRequest = async (
+  path,
+  { signal, timeoutMs, method = "GET", body, headers } = {},
+) => {
   const controller = new AbortController();
   let timedOut = false;
   const timeout = setTimeout(() => {
@@ -44,25 +47,33 @@ export const apiRequest = async (path, { signal, timeoutMs } = {}) => {
     }
   }
 
+  const requestHeaders = { Accept: "application/json", ...headers };
+
+  if (body !== undefined) {
+    requestHeaders["Content-Type"] = "application/json";
+  }
+
   try {
     const response = await fetch(`${API_BASE_URL}${path}`, {
-      headers: { Accept: "application/json" },
+      method,
+      headers: requestHeaders,
+      body: body === undefined ? undefined : JSON.stringify(body),
+      credentials: "include",
       signal: controller.signal,
     });
     const payload = await readJson(response);
 
     if (!response.ok) {
       throw new ApiError(
-        payload?.message || `Catalogue request failed (${response.status}).`,
+        payload?.message || `Request failed (${response.status}).`,
         { status: response.status },
       );
     }
 
     if (!payload || payload.success !== true) {
-      throw new ApiError(
-        "The catalogue service returned an unexpected response.",
-        { status: response.status },
-      );
+      throw new ApiError("The service returned an unexpected response.", {
+        status: response.status,
+      });
     }
 
     return payload;
@@ -71,17 +82,17 @@ export const apiRequest = async (path, { signal, timeoutMs } = {}) => {
 
     if (error?.name === "AbortError") {
       if (timedOut) {
-        throw new ApiError("The catalogue request timed out.", { cause: error });
+        throw new ApiError("The request timed out.", { cause: error });
       }
 
       if (signal?.aborted) throw error;
 
-      throw new ApiError("The catalogue request was cancelled.", {
+      throw new ApiError("The request was cancelled.", {
         cause: error,
       });
     }
 
-    throw new ApiError("Unable to reach the catalogue service.", {
+    throw new ApiError("Unable to reach the server.", {
       cause: error,
     });
   } finally {
