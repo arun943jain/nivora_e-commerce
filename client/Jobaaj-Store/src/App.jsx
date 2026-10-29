@@ -759,6 +759,7 @@ function App() {
               {link("/products?category=Decor", "Objects & decor")}
               {link("/products?category=Dining", "Dining")}
               {link("/products?category=Furniture", "Furniture")}
+              {session && link("/orders", "My Orders")}
             </nav>
             <div className="header-actions">
               <form
