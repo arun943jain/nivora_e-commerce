@@ -19,6 +19,7 @@ test-mode online payments.
 .
 ├── client/Jobaaj-Store/   React 19 + Vite + Tailwind storefront
 ├── server/                Express 5 + Mongoose API
+├── e2e/                   Headed Playwright end-to-end checks
 └── README.md              This guide
 ```
 
@@ -279,7 +280,7 @@ After entering values:
 8. Deliver a webhook through the tunnel. Confirm a valid signature is accepted,
    an invalid signature is rejected, and a repeated event id is treated as a
    duplicate.
-9. Run the existing checks:
+9. Run the checks:
 
    ```bash
    cd client/Jobaaj-Store
@@ -287,10 +288,54 @@ After entering values:
    npm run build
    ```
 
-   and `node --check` over `server/src`. No test framework is used.
+   and `node --check` over `server/src`. The headed end-to-end suite in `e2e/`
+   covers the customer, admin and payment flows; see
+   [End-to-end checks](#end-to-end-checks).
 
 Test-mode success is not a live payment. Do not switch to live keys or enable
 real charges in this phase.
+
+## End-to-end checks
+
+`e2e/` is a headed Playwright Test suite. It is deliberately isolated from
+normal development:
+
+- It derives a MongoDB URI from `server/.env`, replaces only the database name
+  with `nivora_e2e_test`, and refuses to run unless that name matches exactly.
+- Global setup drops and reseeds **only** `nivora_e2e_test`; teardown drops it
+  again. The regular `nivora` database is never read or modified.
+- It starts its own API on `127.0.0.1:5055` and Vite on
+  `127.0.0.1:5174`, so it never attaches to a dev server pointed at real data.
+- Payments use Razorpay **test mode only**. The suite aborts unless the key
+  starts with `rzp_test_`, makes one checkout attempt, and never types or
+  guesses an OTP.
+
+```bash
+cd e2e
+npm install
+npx playwright install chromium   # first run only
+npx playwright test               # headed, 1 worker, 0 retries
+```
+
+Useful variants:
+
+```bash
+npx playwright test tests/01-storefront.spec.mjs   # one spec
+npx playwright test --ui                           # interactive runner
+npm run report                                     # last HTML report
+```
+
+Requirements and notes:
+
+- Stop other API/Vite dev servers only if they occupy `5055`/`5174`.
+- The seeded sample data is created fresh for each run; no real rows are used.
+- Razorpay webhooks are checked with locally signed fixtures. Deliveries from
+  the real Razorpay dashboard are not exercised locally.
+- If the hosted checkout shows an OTP or phone-verification screen, the payment
+  spec stops, records the state and marks the run as needing manual handling.
+  It does not create a second payment order or make a real charge.
+- Traces, screenshots and reports land in `e2e/.artifacts/` and are ignored by
+  Git.
 
 ## Deployment
 

@@ -1,0 +1,5 @@
+# Playwright output: traces, screenshots, videos and the HTML report
+.artifacts/
+
+# Local install (the root ignore also covers **/node_modules)
+node_modules/

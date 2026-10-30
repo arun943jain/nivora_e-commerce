@@ -5,6 +5,9 @@
 **/dist/
 **/dist-ssr/
 
+# Playwright artifacts (traces, screenshots, HTML report)
+e2e/.artifacts/
+
 # Environment files and local secrets
 .env*
 !.env.example

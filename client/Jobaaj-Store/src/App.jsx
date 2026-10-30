@@ -479,7 +479,13 @@ function App() {
     setProductAttempt((current) => current + 1);
   };
   const add = async (id, qty = 1) => {
-    const product = shopProducts.find((item) => item.id === id);
+    // The product grid can render from its own filtered request before the
+    // shared catalogue finishes loading. Fall back to the local sample entry so
+    // a quick add is never misreported as "out of stock" during that window;
+    // stock and price are still enforced by the server at checkout.
+    const product =
+      shopProducts.find((item) => item.id === id) ||
+      products.find((item) => item.id === id);
     if (!product || product.stock <= 0) {
       setNotice("This piece is currently out of stock");
       return;
@@ -3327,6 +3333,15 @@ const ADMIN_SECTIONS = {
   },
 };
 
+// The table rows use the plural section key, while AdminModal expects the
+// singular record type.
+const ADMIN_MODAL_TYPES = {
+  products: "product",
+  orders: "order",
+  users: "user",
+  coupons: "coupon",
+};
+
 const ADMIN_STATUS_LABELS = {
   products: { Active: "Active", Draft: "Archived" },
   orders: {
@@ -3754,7 +3769,10 @@ function Admin({ route, session, setNotice, categories, onCatalogueChanged }) {
                               type="button"
                               className="table-action"
                               onClick={() =>
-                                setEditor({ type: sectionKey, row })
+                                setEditor({
+                                  type: ADMIN_MODAL_TYPES[sectionKey],
+                                  row,
+                                })
                               }
                             >
                               {sectionKey === "orders"
